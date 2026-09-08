@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 
 import rclpy
+import yaml
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
@@ -18,11 +19,20 @@ from cv_bridge import CvBridge
 
 from scipy.spatial.transform import Rotation as R
 
-from deployment.utils.transformations import start_to_current
-from deployment.utils.visualization import load_calibration, overlay_path
-
+from planning_utils import start_to_current
+from io_utils import load_calibration, overlay_path
+"""
+PathManagerNode from CHOP:
+https://github.com/gershom96/CHOP/blob/main/deployment/path_manager.py
+The path manager maintains the latest predicted waypoint sequence as the active path. 
+When a new path is received, the robot pose at the time of prediction is stored so that
+waypoints can be transformed consistently from the local planning frame into the current 
+odometry frame. During execution, the path manager removes waypoints that hve already been
+ reached or have fallen behind the robot, then publishes the next valid waypoint as the 
+ current navigation target.
+"""
 class PathManagerNode(Node):
-    def __init__(self, camera_config_file: str, visualize: bool, odom_topic: str = "/odom_lidar", image_topic: str = "/camera/camera/color/image_raw/compressed"):
+    def __init__(self, config_path: str, robot_name: str, visualize: bool=True):
         super().__init__("path_manager")
 
         self.qos_profile  = QoSProfile(
@@ -36,6 +46,12 @@ class PathManagerNode(Node):
                 history=QoSHistoryPolicy.KEEP_LAST,  
                 depth=15  
             )
+        self.robot_name = robot_name
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        robot_config = config[robot_name]
+        self.odom_topic = robot_config['odom_topic']
+        self.image_topic = robot_config['image_topic']
         # ---- Params ----
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("world_frame", "odom")
@@ -51,11 +67,8 @@ class PathManagerNode(Node):
         self.overlay_enabled = bool(self.get_parameter("overlay_enabled").value)
         self.overlay_topic = self.get_parameter("overlay_topic").value
 
-        self.cam_matrix, self.dist_coeffs, self.T_base_from_cam = load_calibration(camera_config_file)
+        self.cam_matrix, self.dist_coeffs, self.T_base_from_cam = load_calibration(config['camera_config'])
         self.T_cam_from_base = np.linalg.inv(self.T_base_from_cam)
-
-        self.odom_topic = odom_topic
-        self.image_topic = image_topic
 
         # ---- State ----
         self._lock = threading.Lock()
@@ -231,16 +244,15 @@ class PathManagerNode(Node):
 def main():
 
     parser = argparse.ArgumentParser(description="Run the Path Manager")
-    parser.add_argument("-c", "--config", type=str, help="Path to Camera config file", default="./deployment/camera_matrix.json")
-    parser.add_argument("--visualize", action="store_true", help="Visualize the results", default=True)
-    parser.add_argument("--odom", type=str, default="/odom_lidar", help="Odom topic name")
-    parser.add_argument("--image", type=str, default="/camera/camera/color/image_raw/compressed", help="Image topic name")
-    # parser.add_argument("--image", type=str, default="/out/compressed", help="Image topic name")
+    parser.add_argument("-r", "--robot", type=str, help="Robot Name",
+                        default="husky")
+    parser.add_argument("--config", type=str, help="yaml config file",
+                        default="./robot.yaml")
 
     args, ros_args = parser.parse_known_args()
     
     rclpy.init()
-    node = PathManagerNode(camera_config_file=args.config, visualize=args.visualize, odom_topic=args.odom, image_topic=args.image)
+    node = PathManagerNode(robot_name=args.robot, config_path=args.config)
     try:
         rclpy.spin(node)
     finally:

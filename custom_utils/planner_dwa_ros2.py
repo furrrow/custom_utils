@@ -12,6 +12,7 @@
 import argparse
 import time
 import rclpy
+import yaml
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
@@ -37,8 +38,8 @@ class LaserScanConfig:
     scan_skip: int = 1              # idxs
     laser_assigned: bool = False
 
-class RobotConfig():
-
+class DefaultConfig():
+    # NOTE, max_speed, max_yawrate are over written from yaml file!!
     max_speed = 0.3        # [m/s]
     min_speed = 0.0        # [m/s]
     max_yawrate = 0.25    # [rad/s]
@@ -58,7 +59,7 @@ class RobotConfig():
     robot_radius = 0.2
  
 class Planner(Node):
-    def __init__(self, cmd_topic: str = '/cmd_vel', odom_topic: str = '/odom'):
+    def __init__(self, config_path: str, robot_name: str):
         super().__init__('dwa_costmap')
 
         self.qos_profile = QoSProfile(  
@@ -72,33 +73,33 @@ class Planner(Node):
             history=QoSHistoryPolicy.KEEP_LAST,  
             depth=10  
         )
-
-        self.config = RobotConfig()
-
+        self.robot_name = robot_name
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        self.rate = config["frame_rate"]
+        robot_config = config[robot_name]
         # Laserscan variables
         self.obst = np.zeros((0,2), dtype=float)
         self.laserscan_config = LaserScanConfig()
         self.obs_resolution = 0.05
         self.norm_factor = 1 / self.obs_resolution
-        self.odom_topic = odom_topic
+        self.odom_topic = robot_config['odom_topic']
         print(f"Subscribing to odometry topic: {self.odom_topic}")
         self.sub_odom = self.create_subscription(Odometry, self.odom_topic, self.on_odom, self.qos_profile)
-        print("Subscribing to goal topic: /next_goal")
-        self.sub_goal = self.create_subscription(PoseStamped, '/next_goal', self.on_goal_cartesian_wf, self.qos_profile)
-        print("Subscribing to goal topic: /next_goal_cartesian_rf")
+        self.goal_topic = robot_config['goal_topic']
+        print(f"Subscribing to goal topic: {self.goal_topic}")
+        self.sub_goal = self.create_subscription(PoseStamped, self.goal_topic, self.on_goal_cartesian_wf, self.qos_profile)
+        print("Subscribing to goal topic: /next_goal_cartesian_rf???")
         # self.sub_laser = self.create_subscription(LaserScan, '/scan', self.on_laserscan , self.qos_profile)
-        self.cmd_topic = cmd_topic
-        # choice = input("Publish? 1 or 0: ")
-        
-        # if(int(choice) == 1):
-        if True:
-            self.ctrl_pub = self.create_publisher(Twist, self.cmd_topic, 10)
-            print("Publishing to cmd_vel")
-        else:
-            self.ctrl_pub = self.create_publisher(Twist, "/dont_publish", 1)
-            print("Not publishing!")
+        self.cmd_topic = robot_config['vel_topic']
+        self.ctrl_pub = self.create_publisher(Twist, self.cmd_topic, 10)
+        print(f"Publishing to {self.cmd_topic}")
         self.req_goal_pub = self.create_publisher(Empty, "/req_goal", 10)
 
+        # awkwardly merging DefaultRobotConfig with an external yaml file, maybe fix later...
+        self.config = DefaultConfig()
+        self.config.max_speed = robot_config['max_v']
+        self.config.max_yawrate = robot_config['max_w']
         self.x = None
         self.y = None
         self.yaw = None
@@ -394,7 +395,8 @@ class Planner(Node):
                 self.speed.linear.x = self.X[3]
                 self.speed.angular.z = self.X[4]
                 t2 = time.time()
-                self.get_logger().info(f"Executing DWA control. Time taken: {t2 - t1:.4f} seconds")
+                self.get_logger().info(f"DWA control: v {self.speed.linear.x} w  {self.speed.angular.z}"
+                                       f"Time taken: {t2 - t1:.4f} seconds")
             else:
                 self.get_logger().info("Goal reached!")
                 self.speed.linear.x = 0.0
@@ -410,13 +412,15 @@ class Planner(Node):
             self.main_loop()
     
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Run the Path Manager")
-    parser.add_argument("--cmd", type=str, default='/mcu/command/manual_twist', help="Command topic name")
-    parser.add_argument("--odom", type=str, default='/odom_lidar', help="Odometry topic name")
+    parser = argparse.ArgumentParser(description="Run the DWA Planner")
+    parser.add_argument("-r", "--robot", type=str, help="Robot Name",
+                        default="husky")
+    parser.add_argument("--config", type=str, help="yaml config file",
+                        default="./robot.yaml")
 
     args, ros_args = parser.parse_known_args()
     rclpy.init()
-    node = Planner(cmd_topic=args.cmd, odom_topic=args.odom)
+    node = Planner(robot_name=args.robot, config_path=args.config)
     try:
         node.run()
     except KeyboardInterrupt:

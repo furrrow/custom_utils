@@ -122,19 +122,9 @@ def colorize_pred(pred, vmin=None, vmax=None, add_colorbar=False):
 
 def load_video_as_numpy(path):
     """
-    Loads Video
-    -----------------
     Loads a video as a numpy array of type float 32 and in range 0 to 1
-
-    Parameters
-    ----------
-    path : str
-        Path to the video you want to load
-
-    Returns
-    -------
-    result : np.ndarray
-        Numpy array of shape [Time, Height, Width, Channels]
+    path : str; Path to the video you want to load\
+    result : np.ndarray; Numpy array of shape [Time, Height, Width, Channels]
     """
     cap = cv2.VideoCapture(path)
     frames = []

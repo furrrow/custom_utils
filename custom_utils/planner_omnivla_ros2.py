@@ -64,7 +64,7 @@ class PlannerOmniVLANode(Node):
             self.pub_cmd = self.create_publisher(Twist, "/dont_publish", 1)
             print("Not publishing!")
 
-        self.req_goal_pub = self.create_publisher(Empty, "/req_goal", 10)
+        # self.req_goal_pub = self.create_publisher(Empty, "/req_goal", 10)
         self.pub_req_goal = self.create_publisher(Empty, "/req_goal", 10)
         self.create_subscription(Odometry, "/odom", self.on_odom, self.qos_profile)
         self.create_subscription(PoseStamped, "/next_goal", self.on_goal, self.qos_profile)
@@ -119,15 +119,16 @@ class PlannerOmniVLANode(Node):
                 self._goal_done = True
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
-
+            self.get_logger().info(f"_control_step: atGoal is {self.atGoal(dist, heading_err)}")
         else:
             linear_vel_value, angular_vel_value = self._compute_cmd(dx, dy, heading_err)
             cmd.linear.x = linear_vel_value
             cmd.angular.z = angular_vel_value
-        print(cmd)
+        self.get_logger().info(f"linear_vel_value {linear_vel_value} angular_vel_value {angular_vel_value}")
         self.pub_cmd.publish(cmd)
 
-    def _comp_compute_cmdute_cmd(self, dx: float, dy: float, heading_err: float):
+    def _compute_cmd(self, dx: float, dy: float, heading_err: float):
+        # naive controller?
         EPS = 1e-8
         dt = self.dt
 
@@ -174,7 +175,7 @@ class PlannerOmniVLANode(Node):
             self._control_step()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the Path Manager")
+    parser = argparse.ArgumentParser(description="Run the omnivla planner")
     parser.add_argument("--cmd", type=str, default='/cmd_vel', help="Command topic name")
     args, ros_args = parser.parse_known_args()
     rclpy.init()
