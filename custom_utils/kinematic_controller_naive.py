@@ -91,27 +91,28 @@ class ROSData:
         return valid
 
 class PDControllerNode(Node):
-    def __init__(self, args):
+    def __init__(self, config_path: str, robot_name: str):
         super().__init__("pd_controller")
         WAYPOINT_TIMEOUT = 1  # seconds
         self.vel_msg = Twist()
         self.waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
         self.reached_goal = False
         self.reverse_mode = False
-        self.args = args
+        self.robot_name = robot_name
         # CONSTS
         # parent_dir = "/home/jim/Projects/steernav"
         parent_dir = "/home/gamma-nav/Documents/Projects/git_repos/steernav"
         # parent_dir = "/workspace/steernav"
-        DEPLOY_CONFIG_PATH = f"{parent_dir}/steernav/config/deployment.yaml"
+        DEPLOY_CONFIG_PATH = f"{parent_dir}/steernav/config/robot.yaml"
         with open(DEPLOY_CONFIG_PATH, "r") as f:
             deploy_config = yaml.safe_load(f)
         self.rate = deploy_config["controller_rate"]
         self.waypoint_idx = deploy_config['waypoint_idx']
-        robot_config = deploy_config[args.robot]
-        print(f"using robot config for: {args.robot}")
+        robot_config = deploy_config[robot_name]
+        print(f"using robot config for: {robot_name}")
         self.max_v = robot_config["max_v"]
         self.max_w = robot_config["max_w"]
+        print("maxv:", self.max_v, "maxw", self.max_w)
 
         # ROS Topics
         IMAGE_TOPIC = robot_config['image_topic']
@@ -121,6 +122,8 @@ class PDControllerNode(Node):
         VEL_TOPIC = robot_config['vel_topic']
         print("VEL_TOPIC", VEL_TOPIC)
         self.dt = 1 / self.rate
+        self.dt = 1.5 # how long is the controller expected to reach next waypoint
+        self.get_logger().info(f"setting dt value of controller to {self.dt}")
 
         self.waypoint_sub = self.create_subscription(Float32MultiArray, 
                                                      STEERED_WAYPOINT_TOPIC,
@@ -168,10 +171,12 @@ def main():
     parser = argparse.ArgumentParser(description="Run the PD Controller")
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
+    parser.add_argument("--config", type=str, help="yaml config file",
+                        default="./config/robot.yaml")
     args = parser.parse_args()
     print("robot name: ", args.robot)
     rclpy.init()
-    pd_controller_node = PDControllerNode(args)
+    pd_controller_node = PDControllerNode(robot_name=args.robot, config_path=args.config)
     try:
         rclpy.spin(pd_controller_node)
     except KeyboardInterrupt:

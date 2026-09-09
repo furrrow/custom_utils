@@ -10,6 +10,7 @@ dependencies = [# Add lightweight shared dependencies here if needed (e.g. "nump
     "pyyaml",
     "scipy",
     "tqdm",
+    "transform3d",
 ]
 
 [tool.setuptools.packages.find]

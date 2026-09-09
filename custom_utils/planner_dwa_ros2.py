@@ -194,7 +194,7 @@ class Planner(Node):
         self.X[2] = self.yaw
         self.X[3] = self.v_x
         self.X[4] = self.w_z
-        print("AAwa")
+        print("Odom Assigned")
         self.odom_assigned = True
 
     def on_laserscan(self, msg):

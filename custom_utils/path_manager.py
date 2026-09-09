@@ -18,6 +18,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge
 
 from scipy.spatial.transform import Rotation as R
+from sympy.codegen.ast import continue_
 
 from planning_utils import start_to_current
 from io_utils import load_calibration, overlay_path
@@ -164,8 +165,12 @@ class PathManagerNode(Node):
         with self._lock:
             self._image = img.copy()
             if self._pts_w is not None and self._current_T_w is not None:
-                _pts_w = self._pts_w.copy()
-                T_c = self._current_T_w.copy()
+                if len(self._pts_w) > 0:
+                    _pts_w = self._pts_w.copy()
+                    T_c = self._current_T_w.copy()
+                else:
+                    T_c = None
+                    _pts_w = None
             else:
                 T_c = None
                 _pts_w = None
@@ -207,6 +212,7 @@ class PathManagerNode(Node):
 
         with self._lock:
             self._path_start_xy = self._path_start_xy[keep, :]
+        self.get_logger().info(f"keeping {len(keep)} out of {len(pts_cur)} points.")
         pts_cur = pts_cur[keep, :]
 
         # current frame -> world frame
@@ -230,7 +236,7 @@ class PathManagerNode(Node):
 
         if pts_world.size == 0:
             return
-        gx, gy = pts_world[-1]
+        gx, gy = pts_world[1]
 
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
@@ -251,7 +257,7 @@ class PathManagerNode(Node):
             ps.pose.orientation.w = 1.0
             path_msg.poses.append(ps)
         self.pub_active_path.publish(path_msg)
-        self.get_logger().info(f"getting last pt {gx, gy} of path {pts_world}")
+        self.get_logger().info(f"getting pt {gx, gy}, path_len {len(pts_world)}")
 
 def main():
 
@@ -259,7 +265,8 @@ def main():
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
     parser.add_argument("--config", type=str, help="yaml config file",
-                        default="./config/robot.yaml")
+                        # default="./config/robot.yaml")
+                        default="/home/gamma-nav/Documents/Projects/git_repos/steernav/steernav/config/robot.yaml")
 
     args, ros_args = parser.parse_known_args()
     

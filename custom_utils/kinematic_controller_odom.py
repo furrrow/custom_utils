@@ -15,7 +15,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from scipy.spatial.transform import Rotation as R
 
-from pd_controller_naive import ROSData, pd_controller
+from kinematic_controller_naive import pd_controller
 """
 combined pd_controller fro flownav into the path_manager pipeline:
 https://github.com/utn-air/flownav/blob/main/deployment/src/pd_controller.py
@@ -27,8 +27,6 @@ class PDControllerNode(Node):
     def __init__(self, config_path: str, robot_name: str):
         super().__init__("pd_controller")
         self.vel_msg = Twist()
-        WAYPOINT_TIMEOUT = 1  # seconds
-        self.waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
         self.reached_goal = False
         self.reverse_mode = False
         self.robot_name = robot_name
@@ -51,7 +49,9 @@ class PDControllerNode(Node):
         GOAL_TOPIC = robot_config['goal_topic']
         print("VEL_TOPIC", VEL_TOPIC)
         self.robot_radius = robot_config['robot_radius']
-        self.dt = 1 / self.rate
+        # self.dt = 1 / self.rate
+        self.dt = 1.5 # how long is the controller expected to reach next waypoint
+        self.get_logger().info(f"setting dt value of controller to {self.dt}")
 
         self.x = None
         self.y = None
@@ -79,10 +79,11 @@ class PDControllerNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
-        self.waypoint_sub = self.create_subscription(Float32MultiArray, 
-                                                     WAYPOINT_TOPIC, 
-                                                     self.callback_drive, 
-                                                     qos_profile = self.qos_profile_r)
+        # self.waypoint_sub = self.create_subscription(Float32MultiArray,
+        #                                              WAYPOINT_TOPIC,
+        #                                              self.callback_drive,
+        #                                              qos_profile = self.qos_profile_r)
+
         self.req_goal_pub = self.create_publisher(Empty, "/req_goal", 10)
         self.reached_goal_sub = self.create_subscription(Bool,  REACHED_GOAL_TOPIC,
                                                          self.callback_reached_goal, 10)
@@ -92,10 +93,10 @@ class PDControllerNode(Node):
         self.timer = self.create_timer(1.0 / self.rate, self.main_loop)
         self.get_logger().info("Registered with master node. Waiting for waypoints...")
 
-    def callback_drive(self, waypoint_msg: Float32MultiArray):
-        """Callback function for the waypoint subscriber"""
-        self.get_logger().info("Setting waypoint")
-        self.waypoint.set(waypoint_msg.data)
+    # def callback_drive(self, waypoint_msg: Float32MultiArray):
+    #     """Callback function for the waypoint subscriber"""
+    #     self.get_logger().info("Setting waypoint")
+    #     self.waypoint.set(waypoint_msg.data)
 
     def callback_reached_goal(self, reached_goal_msg: Bool):
         """Callback function for the reached goal subscriber"""
@@ -167,9 +168,10 @@ class PDControllerNode(Node):
             self.get_logger().info("Subgoal reached!")
             self.goalX = None
             self.goalY = None
-        elif self.waypoint.is_valid(verbose=True):
+        else:
             t1 = time.time()
-            v, w = pd_controller(self.waypoint.get(), self.max_v, self.max_w, self.dt, eps=1e-8)
+            next_goal = np.array([self.goalY, self.goalX])
+            v, w = pd_controller(next_goal, self.max_v, self.max_w, self.dt, eps=1e-8)
             if self.reverse_mode:
                 v *= -1
             self.vel_msg.linear.x = v
@@ -177,8 +179,6 @@ class PDControllerNode(Node):
             t2 = time.time()
             self.get_logger().info(f"PD controller: v {v} w  {w}"
                                f"Time taken: {t2 - t1:.4f} seconds")
-        else:
-            self.get_logger().info("waypoint not valid!")
         self.vel_out.publish(self.vel_msg)
 
 def main():
