@@ -2,28 +2,15 @@ import numpy as np
 import yaml
 from typing import Tuple
 import argparse
+
+# ROS2
 import rclpy
-from rclpy.time import Time
 from rclpy.node import Node
+from rclpy.time import Time
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray, Bool
 from rclpy.qos import QoSProfile
 from rclpy.qos import QoSReliabilityPolicy, QoSHistoryPolicy
-
-from ros_data import ROSData
-
-"""
-pd_controller script from flownav:
-https://github.com/utn-air/flownav/blob/main/deployment/src/pd_controller.py
-"""
-
-# GLOBALS
-WAYPOINT_TIMEOUT = 1  # seconds
-vel_msg = Twist()
-waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
-reached_goal = False
-reverse_mode = False
-current_yaw = None
 
 def clip_angle(theta) -> float:
     """Clip angle to [-pi, pi]"""
@@ -57,7 +44,6 @@ def pd_controller(waypoint: np.ndarray, max_v, max_w, dt, eps=1e-8) -> Tuple[flo
     v = np.clip(v, 0, max_v)
     w = np.clip(w, -max_w, max_w)
     return v, w
-
 
 class ROSData:
     def __init__(self, timeout: int = 3, queue_size: int = 1, name: str = ""):
@@ -105,36 +91,39 @@ class ROSData:
         return valid
 
 class PDControllerNode(Node):
-    def __init__(self, config_path: str, robot_name: str):
+    def __init__(self, args):
         super().__init__("pd_controller")
+        WAYPOINT_TIMEOUT = 1  # seconds
         self.vel_msg = Twist()
         self.waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
         self.reached_goal = False
         self.reverse_mode = False
-        self.robot_name = robot_name
+        self.args = args
         # CONSTS
-        with open(config_path, "r") as f:
-            robot_config = yaml.safe_load(f)
-        self.rate = robot_config["frame_rate"]
-
-        robot_config = robot_config[robot_name]
-        print(f"using robot config for: {robot_name}")
+        # parent_dir = "/home/jim/Projects/steernav"
+        parent_dir = "/home/gamma-nav/Documents/Projects/git_repos/steernav"
+        # parent_dir = "/workspace/steernav"
+        DEPLOY_CONFIG_PATH = f"{parent_dir}/steernav/config/deployment.yaml"
+        with open(DEPLOY_CONFIG_PATH, "r") as f:
+            deploy_config = yaml.safe_load(f)
+        self.rate = deploy_config["controller_rate"]
+        self.waypoint_idx = deploy_config['waypoint_idx']
+        robot_config = deploy_config[args.robot]
+        print(f"using robot config for: {args.robot}")
         self.max_v = robot_config["max_v"]
         self.max_w = robot_config["max_w"]
 
         # ROS Topics
         IMAGE_TOPIC = robot_config['image_topic']
         print(f"IMAGE_TOPIC: {IMAGE_TOPIC}")
-        WAYPOINT_TOPIC = robot_config['waypoint_topic']
-        SAMPLED_ACTIONS_TOPIC = robot_config['sampled_actions_topic']
+        STEERED_WAYPOINT_TOPIC = robot_config['steered_waypoint_topic']
         REACHED_GOAL_TOPIC = robot_config['reached_goal_topic']
-        OVERLAY_TOPIC = robot_config['overlay_topic']
         VEL_TOPIC = robot_config['vel_topic']
         print("VEL_TOPIC", VEL_TOPIC)
         self.dt = 1 / self.rate
 
         self.waypoint_sub = self.create_subscription(Float32MultiArray, 
-                                                     WAYPOINT_TOPIC, 
+                                                     STEERED_WAYPOINT_TOPIC,
                                                      self.callback_drive, 
                                                      qos_profile = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
                                                                               history=QoSHistoryPolicy.KEEP_LAST,
@@ -179,12 +168,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run the PD Controller")
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
-    parser.add_argument("--config", type=str, help="yaml config file",
-                        default="./robot.yaml")
     args = parser.parse_args()
     print("robot name: ", args.robot)
     rclpy.init()
-    pd_controller_node = PDControllerNode(robot_name=args.robot, config_path=args.config)
+    pd_controller_node = PDControllerNode(args)
     try:
         rclpy.spin(pd_controller_node)
     except KeyboardInterrupt:

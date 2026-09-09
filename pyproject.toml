@@ -2,10 +2,15 @@
 name = "custom_utils"
 version = "0.1.0"
 description = "Shared custom utilities"
-dependencies = [
-    "custom_utils",
-    # Add lightweight shared dependencies here if needed (e.g. "numpy")
+dependencies = [# Add lightweight shared dependencies here if needed (e.g. "numpy")
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+    "pillow",
+    "pyyaml",
+    "scipy",
+    "tqdm",
 ]
 
-[tool.uv.sources]
-custom_utils = { workspace = true }
+[tool.setuptools.packages.find]
+include = ["custom_utils*"]

@@ -30,9 +30,18 @@ waypoints can be transformed consistently from the local planning frame into the
 odometry frame. During execution, the path manager removes waypoints that hve already been
  reached or have fallen behind the robot, then publishes the next valid waypoint as the 
  current navigation target.
+inputs:
+- /path topic type Path of any trajectories from your policies
+- /started type Empty when the path has started. 
+- /req_goal the planner requests next waypoint once the current one is reached.
+- odom from your robot
+- camera input from image topic, for runtime visual overlay
+outputs:
+- /next_goal, the next waypoint on the current trajectory
+- /active_path, of tyep Path, current path that is being executed.
 """
 class PathManagerNode(Node):
-    def __init__(self, config_path: str, robot_name: str, visualize: bool=True):
+    def __init__(self, config_path: str, robot_name: str, visualize: bool=False):
         super().__init__("path_manager")
 
         self.qos_profile  = QoSProfile(
@@ -67,7 +76,7 @@ class PathManagerNode(Node):
         self.overlay_enabled = bool(self.get_parameter("overlay_enabled").value)
         self.overlay_topic = self.get_parameter("overlay_topic").value
 
-        self.cam_matrix, self.dist_coeffs, self.T_base_from_cam = load_calibration(config['camera_config'])
+        self.cam_matrix, self.dist_coeffs, self.T_base_from_cam = load_calibration(config['cam_matrix'])
         self.T_cam_from_base = np.linalg.inv(self.T_base_from_cam)
 
         # ---- State ----
@@ -105,6 +114,7 @@ class PathManagerNode(Node):
     # ---------------- callbacks ----------------
 
     def on_odom(self, msg: Odometry):
+        # gets transformation matrix from world to base as current_T_w.
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         yaw = R.from_quat([q.x, q.y, q.z, q.w]).as_euler("xyz")[2]
@@ -147,6 +157,7 @@ class PathManagerNode(Node):
         self._drop_behind_and_publish()
 
     def on_image(self, msg: CompressedImage):
+        # publishes image overlay for visualization
         if not self.overlay_enabled:
             return
         img = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -247,7 +258,7 @@ def main():
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
     parser.add_argument("--config", type=str, help="yaml config file",
-                        default="./robot.yaml")
+                        default="./config/robot.yaml")
 
     args, ros_args = parser.parse_known_args()
     

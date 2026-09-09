@@ -39,7 +39,7 @@ class LaserScanConfig:
     laser_assigned: bool = False
 
 class DefaultConfig():
-    # NOTE, max_speed, max_yawrate are over written from yaml file!!
+    # NOTE, max_speed, max_yawrate are overwritten from yaml file!!
     max_speed = 0.3        # [m/s]
     min_speed = 0.0        # [m/s]
     max_yawrate = 0.25    # [rad/s]
@@ -100,6 +100,7 @@ class Planner(Node):
         self.config = DefaultConfig()
         self.config.max_speed = robot_config['max_v']
         self.config.max_yawrate = robot_config['max_w']
+        self.config.robot_radius = robot_config['robot_radius']
         self.x = None
         self.y = None
         self.yaw = None

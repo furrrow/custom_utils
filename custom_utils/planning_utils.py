@@ -3,6 +3,8 @@ import math
 
 def start_to_current(T_w_start: np.ndarray, T_w_cur: np.ndarray, points_start: np.ndarray) -> np.ndarray:
     """
+    converts pts relative to robot's start point, and converts the same points to robot's current frame (my guess)
+    - transform from start to world frame, and then go from world frame to current frame
     points_start: (N,2) in START frame
     returns:      (N,2) in CURRENT frame
     p^c = (T^w_c)^-1 * T^w_s * p^s
