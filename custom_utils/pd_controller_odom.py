@@ -41,6 +41,7 @@ class PDControllerNode(Node):
         print(f"using robot config for: {robot_name}")
         self.max_v = robot_config["max_v"]
         self.max_w = robot_config["max_w"]
+        print("maxv:", self.max_v, "maxw", self.max_w)
 
         # ROS Topics
         WAYPOINT_TOPIC = robot_config['waypoint_topic']

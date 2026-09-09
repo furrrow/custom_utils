@@ -417,7 +417,7 @@ if __name__ == '__main__':
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
     parser.add_argument("--config", type=str, help="yaml config file",
-                        default="./robot.yaml")
+                        default="./config/robot.yaml")
 
     args, ros_args = parser.parse_known_args()
     rclpy.init()
