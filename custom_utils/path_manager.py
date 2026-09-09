@@ -251,6 +251,7 @@ class PathManagerNode(Node):
             ps.pose.orientation.w = 1.0
             path_msg.poses.append(ps)
         self.pub_active_path.publish(path_msg)
+        self.get_logger().info(f"getting last pt {gx, gy} of path {pts_world}")
 
 def main():
 
