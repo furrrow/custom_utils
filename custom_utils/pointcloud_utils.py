@@ -1340,9 +1340,10 @@ def merge_points(points_input:np.ndarray, projected_patch: np.ndarray,
 
 
 def update_points(points_input, detection_queue: list[sv.Detections],
-                  min_record_num=6, robot_velocity_camera=np.array([0, 0, 0.1]), time_incr=0.1, time_look_ahead=1.0):
+                  min_record_num=6, robot_velocity_camera=np.array([0, 0, 0.1]),
+                  time_incr=0.1, time_look_ahead=1.0):
     """
-    inflate detected objects' pointcloudds in the direction of their travel
+    inflate detected objects' pointclouds in the direction of their travel
     :param points_input:
     :param detection_queue:
     :param robot_velocity_camera: in the CAMERA FRAME: x-right, y-down, z-forward
@@ -1350,45 +1351,63 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     :param time_look_ahead:
     :return:
     """
-    last_detection = detection_queue[-1]
+    point_movement = []
     if len(detection_queue) < min_record_num:
-        return points_input
-    if len(last_detection.tracker_id) == 0:
-        return points_input
+        return points_input, point_movement
 
-    for id in last_detection.tracker_id:
+    last_detection = detection_queue[-1]
+
+    if (last_detection.tracker_id is None) or (len(last_detection.tracker_id) == 0):
+        return points_input, point_movement
+    original_points = points_input.copy()
+    for track_id in last_detection.tracker_id:
         median_depth_list = []
+        frame_indices = []
         # extract depth of the bounding boxes
-        for i in range(len(detection_queue)):
-            # print(i, detection_queue[i])
-            pos_dict = detection_queue[i].data
-            if id in pos_dict:
-                median_depth_list.append(pos_dict[id])
+        for frame_idx, detection in enumerate(detection_queue):
+            pos_dict = detection.data
+            if track_id in pos_dict:
+                median_depth_list.append(pos_dict[track_id])
+                frame_indices.append(frame_idx)
         # in case not enough detection on a specific id:
         if len(median_depth_list) < min_record_num:
             continue
         # calculate position change over time
-        median_depth_list = np.array(median_depth_list)
-        changes = np.diff(median_depth_list, axis=0)
-        median_position_shift =np.median(changes, axis=0)
+        median_depth_list = np.asarray(median_depth_list)
+        frame_indices = np.asarray(frame_indices)
+        position_changes = np.diff(median_depth_list, axis=0)
+        frame_changes = np.diff(frame_indices)
+        delta_times = frame_changes * time_incr
+        median_position_shift =np.median(position_changes, axis=0)
+        # calculate velocity
+        observed_velocities = (position_changes / delta_times[:, None])
+        observed_relative_velocity = np.median(observed_velocities, axis=0,)
+        estimated_velocity = observed_relative_velocity + robot_velocity_camera
 
+        if not np.all(np.isfinite(estimated_velocity)):
+            print("nan or inf velocity for estimated_velocity:", estimated_velocity)
+            continue
+        speed = np.linalg.norm(estimated_velocity)
+        # print(f"\n --- > DEBUG: relative_velocity: {estimated_velocity[2]:.2f}, speed: {speed:.3f}\n")
+        if estimated_velocity[2] > -0.01: # Object is moving away from camera, or noisy/close to zero
+            continue
         # extract points from bounding box, project forward to future position
-        last_idx = np.argwhere(last_detection.tracker_id == id)[0][0]
+        matches = np.flatnonzero(last_detection.tracker_id == track_id)
+        if len(matches) == 0:
+            continue
+        last_idx = matches[0]
         x1, y1, x2, y2 = last_detection.xyxy[last_idx].astype(int)
+        h, w = original_points.shape[:2]
+        x1 = np.clip(x1, 0, w)
+        x2 = np.clip(x2, 0, w)
+        y1 = np.clip(y1, 0, h)
+        y2 = np.clip(y2, 0, h)
         box_3d_pts = points_input[y1:y2, x1:x2]
-        observed_velocity = median_position_shift / time_incr
-        relative_velocity = observed_velocity + robot_velocity_camera
-        print(f"\n ----------------- > DEBUG: relative_velocity: {relative_velocity[2]:.2f}\n")
-        if True in np.isnan(relative_velocity):
-            print("nan velocity for position shift:", median_position_shift)
-            continue
-        if relative_velocity[2] > 0: # Object is moving away from camera
-            continue
-        if abs(relative_velocity[2]) < 0.01: # ignore slow moving objects from noise
-            continue
-        future_shift = relative_velocity * time_look_ahead
+        future_shift = estimated_velocity * time_look_ahead
         box_project_forward = box_3d_pts + future_shift
-
-        print(f"moving 3d loc by: {np.median(box_3d_pts, axis=(0, 1)) - np.median(box_project_forward, axis=(0, 1))}")
+        prev_median_point = np.median(box_3d_pts, axis=(0, 1))
+        after_median_point = np.median(box_project_forward, axis=(0, 1))
+        print(f"moving 3d loc [right, down fwd] by: {prev_median_point - after_median_point}")
+        point_movement.append((prev_median_point, after_median_point))
         points_input = merge_points(points_input, box_project_forward, x1, y1, x2, y2,)
-    return points_input
+    return points_input, point_movement

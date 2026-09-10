@@ -13,6 +13,8 @@ from typing import Any, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw
+from numpy import ndarray
+
 from custom_utils.io_utils import overlay_path, plot_bbox
 import cv2
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -563,6 +565,7 @@ def visualize_path(
         T_cam_from_base: np.ndarray,
         before_path:np.ndarray,
         after_path :np.ndarray,
+        point_movement_bev : list[tuple[np.ndarray, np.ndarray]],
         idx: int,
         args: argparse.Namespace,
 ) -> np.ndarray:
@@ -608,6 +611,7 @@ def visualize_path(
                             sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale, )
     # know that the x-axis is flipped , so that it goes from pos -> negative
     axes[0, 1].invert_xaxis()
+    plot_velocity_displacement_arrow(axes[0, 1], point_movement_bev)
     axes[0, 1].plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=2.2)
     axes[0, 1].plot(after_path[:, 1], after_path[:, 0], color="green", linewidth=2.2)
 
@@ -624,6 +628,7 @@ def visualize_path(
     # know that the x-axis is flipped , so that it goes from pos -> negative
     ax.invert_xaxis()
     ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="x", s=36, c="yellow", linewidths=1.5)
+    plot_velocity_displacement_arrow(ax, point_movement_bev)
     ax.set_title("Red:occupied, Grey:unknown")
     ax.set_xlabel("y (m)")
     ax.set_ylabel("x (m)")
@@ -645,6 +650,7 @@ def visualize_static_dynamic_paths(
         before_path:np.ndarray,
         static_path :np.ndarray,
         dynamic_path :np.ndarray,
+        point_movement_bev : list[tuple[np.ndarray, np.ndarray]],
         idx: int,
         args: argparse.Namespace,
 ) -> np.ndarray:
@@ -691,6 +697,7 @@ def visualize_static_dynamic_paths(
                             sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale, )
     # know that the x-axis is flipped , so that it goes from pos -> negative
     axes[0, 1].invert_xaxis()
+    plot_velocity_displacement_arrow(axes[0, 1], point_movement_bev)
     axes[0, 1].plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=2.2)
     axes[0, 1].plot(dynamic_path[:, 1], dynamic_path[:, 0], color="green", linewidth=2.2)
 
@@ -699,13 +706,14 @@ def visualize_static_dynamic_paths(
                             sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale, )
     # know that the x-axis is flipped , so that it goes from pos -> negative
     axes[0, 2].invert_xaxis()
+    plot_velocity_displacement_arrow(axes[0, 2], point_movement_bev)
     axes[0, 2].plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=2.2)
     axes[0, 2].plot(static_path[:, 1], static_path[:, 0], color="green", linewidth=2.2)
 
 
     # 3. Depth map in camera view
     # the depth y-axis are flipped
-    plot_scalar_map(axes[1, 0], depth[::-1, :], extent, "Depth",
+    plot_scalar_map(axes[1, 0], depth[::-1, :], None, "Depth",
                     sensor_xy, cmap="coolwarm", vmin=0, vmax=depth_scale, )
 
     # occupied / free / unknown mixed view:
@@ -717,6 +725,8 @@ def visualize_static_dynamic_paths(
     # know that the x-axis is flipped , so that it goes from pos -> negative
     ax.invert_xaxis()
     ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="x", s=36, c="yellow", linewidths=1.5)
+
+    plot_velocity_displacement_arrow(ax, point_movement_bev)
     ax.set_title("Dynamic!! Red:occupied, Grey:unknown")
     ax.set_xlabel("y (m)")
     ax.set_ylabel("x (m)")
@@ -731,6 +741,8 @@ def visualize_static_dynamic_paths(
     # know that the x-axis is flipped , so that it goes from pos -> negative
     ax.invert_xaxis()
     ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="x", s=36, c="yellow", linewidths=1.5)
+
+    plot_velocity_displacement_arrow(ax, point_movement_bev)
     ax.set_title("Static: Red:occupied, Grey:unknown")
     ax.set_xlabel("y (m)")
     ax.set_ylabel("x (m)")
@@ -740,6 +752,25 @@ def visualize_static_dynamic_paths(
     image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
     plt.close(fig)
     return image_rgb
+
+
+def plot_velocity_displacement_arrow(ax, point_movement_bev: list[tuple[ndarray, ndarray]]):
+    for prev_point, after_point in point_movement_bev:
+        ax.annotate(
+            "",
+            xy=(after_point[1], after_point[0]),
+            xytext=(prev_point[1], prev_point[0]),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color="yellow",
+                linewidth=2.0,
+            ),
+        )
+
+        # Optional: show start/end points
+        ax.scatter(prev_point[1], prev_point[0], marker="X", c="red", s=20)
+        ax.scatter(after_point[1], after_point[0], marker="P", c="green", s=20)
+
 
 def debug_visualize(
         depth: np.ndarray,
