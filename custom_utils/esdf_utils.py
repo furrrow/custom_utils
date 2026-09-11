@@ -566,7 +566,6 @@ def visualize_path(
         before_path:np.ndarray,
         after_path :np.ndarray,
         point_movement_bev : list[tuple[np.ndarray, np.ndarray]],
-        idx: int,
         args: argparse.Namespace,
 ) -> np.ndarray:
     extent = [args.x_min, args.x_max, args.y_min, args.y_max]
@@ -589,7 +588,6 @@ def visualize_path(
     fig, axes = plt.subplots(2, 2, figsize=(12, 12))
     fig.suptitle(
         (
-            f"frame {idx} | "
             f"filtered points: {filtered.shape[0]} | "
             f"frame: {args.frame_preset} | res: {args.resolution:.2f} m"
             f"{alignment_text}"

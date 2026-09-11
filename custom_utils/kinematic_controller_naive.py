@@ -182,7 +182,7 @@ def main():
     parser.add_argument("--steer", action="store_true",
                         help="listen to steered waypoint topic")
     parser.add_argument("--dt", type=float, help="dt for pd controller",
-                        default=0.0)
+                        default=1.0)
     args = parser.parse_args()
     print("robot name: ", args.robot)
     rclpy.init()
