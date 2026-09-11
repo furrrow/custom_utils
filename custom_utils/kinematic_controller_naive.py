@@ -91,7 +91,7 @@ class ROSData:
         return valid
 
 class PDControllerNode(Node):
-    def __init__(self, config_path: str, robot_name: str):
+    def __init__(self, config_path: str, robot_name: str, default_dt:float=0.0, steer:bool = False):
         super().__init__("pd_controller")
         WAYPOINT_TIMEOUT = 1  # seconds
         self.vel_msg = Twist()
@@ -117,16 +117,22 @@ class PDControllerNode(Node):
         # ROS Topics
         IMAGE_TOPIC = robot_config['image_topic']
         print(f"IMAGE_TOPIC: {IMAGE_TOPIC}")
-        STEERED_WAYPOINT_TOPIC = robot_config['steered_waypoint_topic']
+        if steer:
+            WAYPOINT_TOPIC = robot_config['steered_waypoint_topic']
+        else:
+            WAYPOINT_TOPIC = robot_config['waypoint_topic']
         REACHED_GOAL_TOPIC = robot_config['reached_goal_topic']
         VEL_TOPIC = robot_config['vel_topic']
         print("VEL_TOPIC", VEL_TOPIC)
-        self.dt = 1 / self.rate
-        self.dt = 1.5 # how long is the controller expected to reach next waypoint
+        print("subscribing to WAYPOINT_TOPIC", WAYPOINT_TOPIC)
+        if default_dt > 0:  # how long is the controller expected to reach next waypoint
+            self.dt = default_dt
+        else:
+            self.dt = 1 / self.rate
         self.get_logger().info(f"setting dt value of controller to {self.dt}")
 
         self.waypoint_sub = self.create_subscription(Float32MultiArray, 
-                                                     STEERED_WAYPOINT_TOPIC,
+                                                     WAYPOINT_TOPIC,
                                                      self.callback_drive, 
                                                      qos_profile = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
                                                                               history=QoSHistoryPolicy.KEEP_LAST,
@@ -173,10 +179,14 @@ def main():
                         default="husky")
     parser.add_argument("--config", type=str, help="yaml config file",
                         default="./config/robot.yaml")
+    parser.add_argument("--steer", action="store_true",
+                        help="listen to steered waypoint topic")
+    parser.add_argument("--dt", type=float, help="dt for pd controller",
+                        default=0.0)
     args = parser.parse_args()
     print("robot name: ", args.robot)
     rclpy.init()
-    pd_controller_node = PDControllerNode(robot_name=args.robot, config_path=args.config)
+    pd_controller_node = PDControllerNode(robot_name=args.robot, config_path=args.config, default_dt=args.dt, steer=args.steer)
     try:
         rclpy.spin(pd_controller_node)
     except KeyboardInterrupt:
