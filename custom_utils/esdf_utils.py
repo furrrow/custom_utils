@@ -571,26 +571,14 @@ def visualize_path_debug(
     extent = [args.x_min, args.x_max, args.y_min, args.y_max]
     extent_flipped = [args.y_min, args.y_max, args.x_min, args.x_max]
     sensor_xy = (args.sensor_x, args.sensor_y)
-    filtered = esdf_result["points_filtered"]
     esdf = esdf_result["esdf"]
     depth_scale = finite_percentile_abs(depth, percentile=99.0)
     esdf_scale = finite_percentile_abs(esdf, percentile=99.0)
-    ground_alignment = esdf_result.get("ground_alignment") if isinstance(esdf_result, dict) else None
-    alignment_text = ""
-    if isinstance(ground_alignment, dict) and ground_alignment.get("enabled"):
-        source = ground_alignment.get("normal_source", "unknown")
-        applied_tilt = ground_alignment.get("applied_tilt_deg")
-        if applied_tilt is None:
-            alignment_text = f" | ground align: {source}"
-        else:
-            alignment_text = f" | ground align: {source} {float(applied_tilt):.1f} deg"
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 12))
     fig.suptitle(
         (
-            f"filtered points: {filtered.shape[0]} | "
             f"frame: {args.frame_preset} | res: {args.resolution:.2f} m"
-            f"{alignment_text}"
         ),
         fontsize=14,
     )
