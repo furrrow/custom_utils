@@ -556,7 +556,7 @@ def save_debug_figure(
     plt.close(fig)
     return image_rgb
 
-def visualize_path(
+def visualize_path_debug(
         depth: np.ndarray,
         rgb: np.ndarray,
         esdf_result: dict[str, np.ndarray],
@@ -632,6 +632,77 @@ def visualize_path(
     ax.set_ylabel("x (m)")
     ax.set_aspect("equal", adjustable="box")
     # Render the Matplotlib figure into an RGB NumPy array.
+    fig.canvas.draw()
+    image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+    plt.close(fig)
+    return image_rgb
+
+def visualize_path(
+        depth: np.ndarray,
+        rgb: np.ndarray,
+        esdf_result: dict[str, np.ndarray],
+        bbox_result: dict[str, np.ndarray],
+        cam_matrix: np.ndarray,
+        T_cam_from_base: np.ndarray,
+        before_path:np.ndarray,
+        after_path :np.ndarray,
+        point_movement_bev : list[tuple[np.ndarray, np.ndarray]],
+        args: argparse.Namespace,
+) -> np.ndarray:
+    extent = [args.x_min, args.x_max, args.y_min, args.y_max]
+    extent_flipped = [args.y_min, args.y_max, args.x_min, args.x_max]
+    sensor_xy = (args.sensor_x, args.sensor_y)
+    filtered = esdf_result["points_filtered"]
+    esdf = esdf_result["esdf"]
+    depth_scale = finite_percentile_abs(depth, percentile=99.0)
+    esdf_scale = finite_percentile_abs(esdf, percentile=99.0)
+    ground_alignment = esdf_result.get("ground_alignment") if isinstance(esdf_result, dict) else None
+    alignment_text = ""
+    if isinstance(ground_alignment, dict) and ground_alignment.get("enabled"):
+        source = ground_alignment.get("normal_source", "unknown")
+        applied_tilt = ground_alignment.get("applied_tilt_deg")
+        if applied_tilt is None:
+            alignment_text = f" | ground align: {source}"
+        else:
+            alignment_text = f" | ground align: {source} {float(applied_tilt):.1f} deg"
+
+    fig, axes = plt.subplots(1, 1, figsize=(12, 12))
+    fig.suptitle(
+        (
+            f"filtered points: {filtered.shape[0]} | "
+            f"frame: {args.frame_preset} | res: {args.resolution:.2f} m"
+            f"{alignment_text}"
+        ),
+        fontsize=14,
+    )
+    # ESDF + paths
+    plot_scalar_map_flipped(axes, esdf, extent_flipped, "ESDF (m)",
+                            sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale, )
+    # know that the x-axis is flipped , so that it goes from pos -> negative
+    axes.invert_xaxis()
+    plot_velocity_displacement_arrow(axes, point_movement_bev)
+    axes.plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=2.2)
+    axes.plot(after_path[:, 1], after_path[:, 0], color="green", linewidth=2.2)
+
+    # 3. Depth map in camera view
+    # the depth y-axis are flipped
+    # plot_scalar_map(axes[1, 0], depth[::-1, :], None, "Depth",
+    #                 sensor_xy, cmap="coolwarm", vmin=0, vmax=depth_scale, )
+    #
+    # # occupied / free / unknown mixed view:
+    # ax = axes[1, 1]
+    # ax.imshow(
+    #     semantic_bev_image(esdf_result["occupied_mask"], esdf_result["visible_free_mask"], esdf_result["unknown_mask"]).swapaxes(0, 1),
+    #     origin="lower", extent=extent_flipped)
+    # # know that the x-axis is flipped , so that it goes from pos -> negative
+    # ax.invert_xaxis()
+    # ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="x", s=36, c="yellow", linewidths=1.5)
+    # plot_velocity_displacement_arrow(ax, point_movement_bev)
+    # ax.set_title("Red:occupied, Grey:unknown")
+    # ax.set_xlabel("y (m)")
+    # ax.set_ylabel("x (m)")
+    # ax.set_aspect("equal", adjustable="box")
+    # # Render the Matplotlib figure into an RGB NumPy array.
     fig.canvas.draw()
     image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
     plt.close(fig)

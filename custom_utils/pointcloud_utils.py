@@ -1340,7 +1340,7 @@ def merge_points(points_input:np.ndarray, projected_patch: np.ndarray,
 
 
 def update_points(points_input, detection_queue: list[sv.Detections],
-                  min_record_num=6, robot_velocity_camera=np.array([0, 0, 0.1]),
+                  last_n_records=2, robot_velocity_camera=np.array([0, 0, 0.1]),
                   time_incr=0.1, time_look_ahead=1.0):
     """
     inflate detected objects' pointclouds in the direction of their travel
@@ -1352,7 +1352,7 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     :return:
     """
     point_movement = []
-    if len(detection_queue) < min_record_num:
+    if len(detection_queue) < last_n_records:
         return points_input, point_movement
 
     last_detection = detection_queue[-1]
@@ -1370,17 +1370,17 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                 median_depth_list.append(pos_dict[track_id])
                 frame_indices.append(frame_idx)
         # in case not enough detection on a specific id:
-        if len(median_depth_list) < min_record_num:
+        if len(median_depth_list) < last_n_records:
             continue
         # calculate position change over time
-        median_depth_list = np.asarray(median_depth_list)
-        frame_indices = np.asarray(frame_indices)
+        median_depth_list = np.asarray(median_depth_list[-last_n_records:])
+        frame_indices = np.asarray(frame_indices[-last_n_records:])
         position_changes = np.diff(median_depth_list, axis=0)
         frame_changes = np.diff(frame_indices)
         delta_times = frame_changes * time_incr
-        median_position_shift =np.median(position_changes, axis=0)
         # calculate velocity
         observed_velocities = (position_changes / delta_times[:, None])
+        # print(f"observed_velocities: {observed_velocities}")
         observed_relative_velocity = np.median(observed_velocities, axis=0,)
         estimated_velocity = observed_relative_velocity + robot_velocity_camera
 
@@ -1389,7 +1389,7 @@ def update_points(points_input, detection_queue: list[sv.Detections],
             continue
         speed = np.linalg.norm(estimated_velocity)
         # print(f"\n --- > DEBUG: relative_velocity: {estimated_velocity[2]:.2f}, speed: {speed:.3f}\n")
-        if estimated_velocity[2] > -0.01: # Object is moving away from camera, or noisy/close to zero
+        if estimated_velocity[2] > -0.00: # Object is moving away from camera, or noisy/close to zero
             continue
         # extract points from bounding box, project forward to future position
         matches = np.flatnonzero(last_detection.tracker_id == track_id)
