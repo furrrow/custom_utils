@@ -19,7 +19,7 @@ from custom_utils.io_utils import overlay_path, plot_bbox
 import cv2
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib
-
+from matplotlib.lines import Line2D
 # matplotlib.use("Agg")
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
@@ -389,40 +389,70 @@ def plot_bool_map(
 
 
 def plot_scalar_map(
-    ax: plt.Axes,
-    values: np.ndarray,
-    extent: Sequence[float],
-    title: str,
-    sensor_xy: tuple[float, float],
-    cmap: str,
-    vmin: float | None = None,
-    vmax: float | None = None,
+        ax: plt.Axes,
+        values: np.ndarray,
+        extent: Sequence[float] | None,
+        title: str,
+        sensor_xy: tuple[float, float],
+        cmap: str,
+        vmin: float | None = None,
+        vmax: float | None = None,
 ) -> None:
-    image = ax.imshow(values, origin="lower", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.scatter([sensor_xy[0]], [sensor_xy[1]], marker="x", s=36, c="yellow", linewidths=1.5)
-    ax.set_title(title)
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
+    image = ax.imshow(values, origin="lower", extent=extent, cmap=cmap,
+                      vmin=vmin, vmax=vmax, interpolation="nearest")
+
+    ax.scatter([sensor_xy[0]], [sensor_xy[1]], marker="X", s=180, c="yellow",
+               edgecolors="black", linewidths=1.5, zorder=10)
+
+    # ax.set_title(title, fontsize=20, pad=14, fontweight="bold")
+    # ax.set_xlabel("Image x / horizontal position", fontsize=18, labelpad=10)
+    # ax.set_ylabel("Image y / vertical position", fontsize=18, labelpad=10)
+
+    ax.tick_params(axis="both", which="major", labelsize=15, width=1.5, length=6)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5)
+
     ax.set_aspect("equal", adjustable="box")
-    plt.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+
+    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Depth (m)", fontsize=17, labelpad=10)
+    cbar.ax.tick_params(labelsize=14, width=1.3, length=5)
+    cbar.outline.set_linewidth(1.3)
 
 def plot_scalar_map_flipped(
-    ax: plt.Axes,
-    values: np.ndarray,
-    extent: Sequence[float],
-    title: str,
-    sensor_xy: tuple[float, float],
-    cmap: str,
-    vmin: float | None = None,
-    vmax: float | None = None,
+        ax: plt.Axes,
+        values: np.ndarray,
+        extent: Sequence[float],
+        title: str,
+        sensor_xy: tuple[float, float],
+        cmap: str,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        colorbar_label: str | None = None,
 ) -> None:
-    image = ax.imshow(values.T, origin="lower", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="x", s=36, c="yellow", linewidths=1.5)
-    ax.set_title(title)
-    ax.set_ylabel("x (m)")
-    ax.set_xlabel("y (m)")
+    image = ax.imshow(values.T, origin="lower", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax,
+                      interpolation="nearest")
+
+    ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="X", s=180, c="yellow",
+               edgecolors="black", linewidths=1.5, zorder=10, label="Robot")
+
+    # ax.set_title(title, fontsize=20, pad=14, fontweight="bold")
+    ax.set_ylabel("Forward position, x (m)", fontsize=18, labelpad=10)
+    ax.set_xlabel("Lateral position, y (m)", fontsize=18, labelpad=10)
+    ax.tick_params(axis="both", which="major", labelsize=15, width=1.5, length=6)
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5)
+
+    ax.grid(True, linestyle="--", linewidth=0.8, alpha=0.35)
     ax.set_aspect("equal", adjustable="box")
-    plt.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+
+    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    if colorbar_label is not None:
+        cbar.set_label(colorbar_label, fontsize=17, labelpad=10)
+    cbar.ax.tick_params(labelsize=14, width=1.3, length=5)
+    cbar.outline.set_linewidth(1.3)
+
 
 custom_cmap_old = LinearSegmentedColormap.from_list(
     "esdf",
@@ -625,75 +655,138 @@ def visualize_path_debug(
     plt.close(fig)
     return image_rgb
 
-def visualize_path_only(
+def visualize_depth_only(
         depth: np.ndarray,
         rgb: np.ndarray,
         esdf_result: dict[str, np.ndarray],
         bbox_result: dict[str, np.ndarray],
         cam_matrix: np.ndarray,
         T_cam_from_base: np.ndarray,
-        before_path:np.ndarray,
-        after_path :np.ndarray,
-        point_movement_bev : list[tuple[np.ndarray, np.ndarray]],
+        before_path: np.ndarray,
+        after_path: np.ndarray,
+        point_movement_bev: list[tuple[np.ndarray, np.ndarray]],
         args: argparse.Namespace,
 ) -> np.ndarray:
-    extent = [args.x_min, args.x_max, args.y_min, args.y_max]
-    extent_flipped = [args.y_min, args.y_max, args.x_min, args.x_max]
     sensor_xy = (args.sensor_x, args.sensor_y)
-    esdf = esdf_result["esdf"]
+    depth_scale = finite_percentile_abs(depth, percentile=99.0)
 
-    fig, axes = plt.subplots(1, 1, figsize=(12, 12))
-    fig.suptitle(
-        (
-            f"frame: {args.frame_preset} | res: {args.resolution:.2f} m"
-        ),
-        fontsize=14,
-    )
-    # 1. plot camera view + paths
-    ax = axes
-    trajectories = np.concatenate((np.expand_dims(before_path, 0), np.expand_dims(after_path, 0)))
-    bbox_img = plot_bbox(rgb, bbox_result, show_plot=False, return_img=True)
-    resized = cv2.resize(bbox_img, dsize=(args.img_w, args.img_h), interpolation=cv2.INTER_CUBIC)
-    overlay = overlay_path(trajectories=trajectories, img=resized, cam_matrix=cam_matrix, T_cam_from_base=T_cam_from_base)
-    ax.imshow(overlay)
-    ax.set_title("Img with Bounding Boxes and paths")
-    ax.axis("off")
-    # Render the Matplotlib figure into an RGB NumPy array.
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=180)
+    plot_scalar_map(ax, depth[::-1, :], None, "Depth", sensor_xy,
+                    cmap="coolwarm", vmin=0, vmax=depth_scale)
+
+    fig.tight_layout(pad=0.8)
     fig.canvas.draw()
     image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
     plt.close(fig)
     return image_rgb
 
-def visualize_esdf(
+def visualize_occupy_only(
+        depth: np.ndarray,
+        rgb: np.ndarray,
         esdf_result: dict[str, np.ndarray],
-        before_path:np.ndarray,
-        after_path :np.ndarray,
-        point_movement_bev : list[tuple[np.ndarray, np.ndarray]],
+        bbox_result: dict[str, np.ndarray],
+        cam_matrix: np.ndarray,
+        T_cam_from_base: np.ndarray,
+        before_path: np.ndarray,
+        after_path: np.ndarray,
+        point_movement_bev: list[tuple[np.ndarray, np.ndarray]],
         args: argparse.Namespace,
 ) -> np.ndarray:
     extent_flipped = [args.y_min, args.y_max, args.x_min, args.x_max]
     sensor_xy = (args.sensor_x, args.sensor_y)
-    filtered = esdf_result["points_filtered"]
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=180)
+
+    bev_img = semantic_bev_image(
+        esdf_result["occupied_mask"],
+        esdf_result["visible_free_mask"],
+        esdf_result["unknown_mask"],
+    ).swapaxes(0, 1)
+
+    ax.imshow(bev_img, origin="lower", extent=extent_flipped, interpolation="nearest")
+    ax.invert_xaxis()
+
+    # ax.scatter([sensor_xy[1]], [sensor_xy[0]], marker="X", s=220, c="yellow",
+    #            edgecolors="black", linewidths=1.8, zorder=10, label="Robot")
+
+    for prev_point, after_point in point_movement_bev:
+        ax.annotate("", xy=(after_point[1], after_point[0]), xytext=(prev_point[1], prev_point[0]),
+                    arrowprops=dict(arrowstyle="-|>", linewidth=3.0, mutation_scale=22,
+                                    color="cyan", edgecolor="black"), zorder=9)
+
+        ax.scatter(prev_point[1], prev_point[0], marker="s", s=90, c="cyan",
+                   edgecolors="black", linewidths=1.2, zorder=10)
+
+        ax.scatter(after_point[1], after_point[0], marker="X", s=110, c="cyan",
+                   edgecolors="black", linewidths=1.2, zorder=10)
+
+    ax.set_xlabel("Lateral position, y (m)", fontsize=18, labelpad=10)
+    ax.set_ylabel("Forward position, x (m)", fontsize=18, labelpad=10)
+    ax.tick_params(axis="both", which="major", labelsize=15, width=1.5, length=6)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5)
+
+    ax.grid(True, linestyle="--", linewidth=0.8, alpha=0.35)
+    ax.set_aspect("equal", adjustable="box")
+
+    fig.tight_layout(pad=0.8)
+    fig.canvas.draw()
+    image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+    plt.close(fig)
+
+    return image_rgb
+
+
+
+def visualize_esdf(
+        esdf_result: dict[str, np.ndarray],
+        before_path: np.ndarray,
+        after_path: np.ndarray,
+        point_movement_bev: list[tuple[np.ndarray, np.ndarray]],
+        args: argparse.Namespace,
+) -> np.ndarray:
+    extent_flipped = [args.y_min, args.y_max, args.x_min, args.x_max]
+    sensor_xy = (args.sensor_x, args.sensor_y)
     esdf = esdf_result["esdf"]
     esdf_scale = finite_percentile_abs(esdf, percentile=99.0)
 
-    fig, axes = plt.subplots(1, 1, figsize=(12, 12))
-    fig.suptitle(
-        (
-            f"filtered points: {filtered.shape[0]} | "
-            f"frame: {args.frame_preset} | res: {args.resolution:.2f} m"
-        ),
-        fontsize=14,
-    )
-    # ESDF + paths
-    plot_scalar_map_flipped(axes, esdf, extent_flipped, "ESDF (m)",
-                            sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale, )
-    # know that the x-axis is flipped , so that it goes from pos -> negative
-    axes.invert_xaxis()
-    plot_velocity_displacement_arrow(axes, point_movement_bev)
-    axes.plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=2.2)
-    axes.plot(after_path[:, 1], after_path[:, 0], color="green", linewidth=2.2)
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=180)
 
+    plot_scalar_map_flipped(ax, esdf, extent_flipped, "Euclidean Signed Distance Field",
+                            sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale,
+                            colorbar_label="ESDF (m)")
+
+    ax.invert_xaxis()
+
+    for prev_point, after_point in point_movement_bev:
+        ax.annotate("", xy=(after_point[1], after_point[0]), xytext=(prev_point[1], prev_point[0]),
+                    arrowprops=dict(arrowstyle="-|>", linewidth=3.0, mutation_scale=22,
+                                    color="cyan", edgecolor="black"), zorder=9)
+        ax.scatter(prev_point[1], prev_point[0], marker="s", s=90, c="cyan",
+                   edgecolors="black", linewidths=1.2, zorder=10)
+        ax.scatter(after_point[1], after_point[0], marker="X", s=110, c="cyan",
+                   edgecolors="black", linewidths=1.2, zorder=10)
+
+    original_path, = ax.plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=5.0,
+                             label="Original path", zorder=8)
+    optimized_path, = ax.plot(after_path[:, 1], after_path[:, 0], color="lime", linewidth=5.0,
+                              label="Optimized path", zorder=8)
+
+    # dynamic_obstacle = Line2D([], [], marker="s", linestyle="None", markersize=10,
+    #                           markerfacecolor="cyan", markeredgecolor="black",
+    #                           label="Dynamic obstacle")
+    #
+    # obstacle_motion = Line2D([], [], marker=r"$\rightarrow$", linestyle="None", markersize=18,
+    #                          color="cyan", markeredgecolor="black",
+    #                          label="Direction of travel")
+    #
+    # robot = Line2D([], [], marker="X", linestyle="None", markersize=11,
+    #                markerfacecolor="yellow", markeredgecolor="black", label="Robot")
+
+    # ax.legend(handles=[robot, original_path, optimized_path, dynamic_obstacle, obstacle_motion],
+    #           loc="upper right", fontsize=13, framealpha=0.9)
+
+    fig.tight_layout(pad=0.8)
     fig.canvas.draw()
     image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
     plt.close(fig)
