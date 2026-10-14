@@ -414,7 +414,7 @@ def plot_scalar_map(
 
     ax.set_aspect("equal", adjustable="box")
 
-    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.035, pad=0.025, shrink=0.50,)
     cbar.set_label("Depth (m)", fontsize=17, labelpad=10)
     cbar.ax.tick_params(labelsize=14, width=1.3, length=5)
     cbar.outline.set_linewidth(1.3)
@@ -447,7 +447,7 @@ def plot_scalar_map_flipped(
     ax.grid(True, linestyle="--", linewidth=0.8, alpha=0.35)
     ax.set_aspect("equal", adjustable="box")
 
-    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.035, pad=0.025, shrink=0.50,)
     if colorbar_label is not None:
         cbar.set_label(colorbar_label, fontsize=17, labelpad=10)
     cbar.ax.tick_params(labelsize=14, width=1.3, length=5)
@@ -628,8 +628,8 @@ def visualize_path_debug(
     # know that the x-axis is flipped , so that it goes from pos -> negative
     axes[0, 1].invert_xaxis()
     plot_velocity_displacement_arrow(axes[0, 1], point_movement_bev)
-    axes[0, 1].plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=2.2)
-    axes[0, 1].plot(after_path[:, 1], after_path[:, 0], color="green", linewidth=2.2)
+    axes[0, 1].plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=5)
+    axes[0, 1].plot(after_path[:, 1], after_path[:, 0], color="green", linewidth=5)
 
     # 3. Depth map in camera view
     # the depth y-axis are flipped
@@ -673,12 +673,27 @@ def visualize_depth_only(
     fig, ax = plt.subplots(figsize=(10, 8), dpi=180)
     plot_scalar_map(ax, depth[::-1, :], None, "Depth", sensor_xy,
                     cmap="coolwarm", vmin=0, vmax=depth_scale)
-
+    ax.axis('off')
     fig.tight_layout(pad=0.8)
     fig.canvas.draw()
     image_rgb = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
     plt.close(fig)
     return image_rgb
+
+def visualize_bbox_only(
+        depth: np.ndarray,
+        rgb: np.ndarray,
+        esdf_result: dict[str, np.ndarray],
+        bbox_result: dict[str, np.ndarray],
+        cam_matrix: np.ndarray,
+        T_cam_from_base: np.ndarray,
+        before_path: np.ndarray,
+        after_path: np.ndarray,
+        point_movement_bev: list[tuple[np.ndarray, np.ndarray]],
+        args: argparse.Namespace,
+) -> np.ndarray:
+    bbox_img = plot_bbox(rgb, bbox_result, show_plot=False, return_img=True)
+    return bbox_img
 
 def visualize_occupy_only(
         depth: np.ndarray,
@@ -753,7 +768,7 @@ def visualize_esdf(
     fig, ax = plt.subplots(figsize=(10, 10), dpi=180)
 
     plot_scalar_map_flipped(ax, esdf, extent_flipped, "Euclidean Signed Distance Field",
-                            sensor_xy, cmap=custom_cmap, vmin=-esdf_scale, vmax=esdf_scale,
+                            sensor_xy, cmap="viridis", vmin=-esdf_scale, vmax=esdf_scale,
                             colorbar_label="ESDF (m)")
 
     ax.invert_xaxis()
@@ -767,10 +782,10 @@ def visualize_esdf(
         ax.scatter(after_point[1], after_point[0], marker="X", s=110, c="cyan",
                    edgecolors="black", linewidths=1.2, zorder=10)
 
-    original_path, = ax.plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=5.0,
-                             label="Original path", zorder=8)
-    optimized_path, = ax.plot(after_path[:, 1], after_path[:, 0], color="lime", linewidth=5.0,
-                              label="Optimized path", zorder=8)
+    # original_path, = ax.plot(before_path[:, 1], before_path[:, 0], color="red", linewidth=5.0,
+    #                          label="Original path", zorder=8)
+    # optimized_path, = ax.plot(after_path[:, 1], after_path[:, 0], color="lime", linewidth=5.0,
+    #                           label="Optimized path", zorder=8)
 
     # dynamic_obstacle = Line2D([], [], marker="s", linestyle="None", markersize=10,
     #                           markerfacecolor="cyan", markeredgecolor="black",

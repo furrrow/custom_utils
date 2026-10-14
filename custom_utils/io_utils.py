@@ -208,7 +208,7 @@ def overlay_path(trajectories: np.ndarray,
         if i == 0:
             my_color = policy_color # plot baseline policy color as policy_color (red?)
         if len(pts_pix) >= 2:
-            cv2.polylines(overlay, [pts_pix], isClosed=False, color=my_color, thickness=2)
+            cv2.polylines(overlay, [pts_pix], isClosed=False, color=my_color, thickness=5)
         else:
             for pt in pts_pix:
                 cv2.circle(overlay, tuple(pt), radius=3, color=my_color, thickness=-1)

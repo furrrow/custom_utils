@@ -2,6 +2,7 @@ import numpy as np
 import yaml
 from typing import Tuple
 import argparse
+from pathlib import Path
 
 # ROS2
 import rclpy
@@ -99,12 +100,7 @@ class PDControllerNode(Node):
         self.reached_goal = False
         self.reverse_mode = False
         self.robot_name = robot_name
-        # CONSTS
-        # parent_dir = "/home/jim/Projects/steernav"
-        parent_dir = "/home/gamma-nav/Documents/Projects/git_repos/steernav"
-        # parent_dir = "/workspace/steernav"
-        DEPLOY_CONFIG_PATH = f"{parent_dir}/steernav/config/robot.yaml"
-        with open(DEPLOY_CONFIG_PATH, "r") as f:
+        with open(config_path, "r") as f:
             deploy_config = yaml.safe_load(f)
         self.rate = deploy_config["controller_rate"]
         self.waypoint_idx = deploy_config['waypoint_idx']
@@ -178,7 +174,7 @@ def main():
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
     parser.add_argument("--config", type=str, help="yaml config file",
-                        default="./config/robot.yaml")
+                        default=str(Path(__file__).resolve().parents[3] / "steernav/config/robot.yaml"))
     parser.add_argument("--steer", action="store_true",
                         help="listen to steered waypoint topic")
     parser.add_argument("--dt", type=float, help="dt for pd controller",
