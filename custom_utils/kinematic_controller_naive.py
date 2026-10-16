@@ -43,7 +43,7 @@ def pd_controller(waypoint: np.ndarray, max_v, max_w, dt, eps=1e-8) -> Tuple[flo
     else:
         v = dx / dt
         w = np.arctan(dy / dx) / dt
-    print(f"before clipping v: {v}, w: {w}")
+    print(f"before clipping v: {v:.3f}, w: {w:.3f}")
     v = np.clip(v, 0, max_v)
     w = np.clip(w, -max_w, max_w)
     return v, w
@@ -112,7 +112,6 @@ class PDControllerNode(Node):
         with open(config_path, "r") as f:
             deploy_config = yaml.safe_load(f)
         self.rate = deploy_config["controller_rate"]
-        self.waypoint_idx = deploy_config['waypoint_idx']
         robot_config = deploy_config[robot_name]
         print(f"using robot config for: {robot_name}")
         self.max_v = robot_config["max_v"]
@@ -227,7 +226,7 @@ class PDControllerNode(Node):
             v, w = pd_controller(self.waypoint.get(), self.max_v, self.max_w, self.dt, eps=1e-8)
             self.vel_msg.linear.x = v
             self.vel_msg.angular.z = w
-            self.get_logger().info(f"Publishing new velocity: {v}, {w}")
+            self.get_logger().info(f"Publishing new velocity: {v:.3f}, {w:.3f}")
         else:
             self.vel_msg = Twist() # no velocity
             self.waypoint.clear()
