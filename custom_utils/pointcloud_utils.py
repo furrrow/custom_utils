@@ -5,11 +5,10 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-import supervision as sv
 from scipy.ndimage import distance_transform_edt
 from dataclasses import dataclass
 import time
-import numba
+# import numba
 
 @dataclass
 class BEVGrid:
@@ -715,33 +714,33 @@ def rasterize_lines_vectorized(r0, r1, c0, c1, occluder_grid):
 
     occluder_grid[r_interp[valid_mask], c_interp[valid_mask]] = True
 
-@numba.njit(fastmath=True)
-def draw_lines_numba(r0_arr, r1_arr, c0_arr, c1_arr, occluder):
-    # faster version of bresenham_line
-    H, W = occluder.shape
-    for i in numba.prange(len(r0_arr)):
-        r0, r1 = r0_arr[i], r1_arr[i]
-        c0, c1 = c0_arr[i], c1_arr[i]
-
-        dr = abs(r1 - r0)
-        dc = abs(c1 - c0)
-        sr = 1 if r0 < r1 else -1
-        sc = 1 if c0 < c1 else -1
-        err = dc - dr
-
-        r, c = r0, c0
-        while True:
-            if 0 <= r < H and 0 <= c < W:
-                occluder[r, c] = True
-            if r == r1 and c == c1:
-                break
-            e2 = 2 * err
-            if e2 > -dr:
-                err -= dr
-                c += sc
-            if e2 < dc:
-                err += dc
-                r += sr
+# @numba.njit(fastmath=True)
+# def draw_lines_numba(r0_arr, r1_arr, c0_arr, c1_arr, occluder):
+#     # faster version of bresenham_line
+#     H, W = occluder.shape
+#     for i in numba.prange(len(r0_arr)):
+#         r0, r1 = r0_arr[i], r1_arr[i]
+#         c0, c1 = c0_arr[i], c1_arr[i]
+#
+#         dr = abs(r1 - r0)
+#         dc = abs(c1 - c0)
+#         sr = 1 if r0 < r1 else -1
+#         sc = 1 if c0 < c1 else -1
+#         err = dc - dr
+#
+#         r, c = r0, c0
+#         while True:
+#             if 0 <= r < H and 0 <= c < W:
+#                 occluder[r, c] = True
+#             if r == r1 and c == c1:
+#                 break
+#             e2 = 2 * err
+#             if e2 > -dr:
+#                 err -= dr
+#                 c += sc
+#             if e2 < dc:
+#                 err += dc
+#                 r += sr
 
 def _grid_centers_from_indices(rows, cols, x_min, y_min, resolution):
     x = x_min + (cols.astype(np.float32) + 0.5) * resolution
@@ -868,15 +867,15 @@ def get_inbound_points(points_xyz, grid:BEVGrid):
 
     return points[in_bounds]
 
-@numba.njit
-def _find_min_bin_hits(bin_idx, ranges, x_pts, y_pts, hit_ranges, hit_points):
-    for i in numba.prange(len(bin_idx)):
-        b = bin_idx[i]
-        r = ranges[i]
-        if r < hit_ranges[b]:
-            hit_ranges[b] = r
-            hit_points[b, 0] = x_pts[i]
-            hit_points[b, 1] = y_pts[i]
+# @numba.njit
+# def _find_min_bin_hits(bin_idx, ranges, x_pts, y_pts, hit_ranges, hit_points):
+#     for i in numba.prange(len(bin_idx)):
+#         b = bin_idx[i]
+#         r = ranges[i]
+#         if r < hit_ranges[b]:
+#             hit_ranges[b] = r
+#             hit_points[b, 0] = x_pts[i]
+#             hit_points[b, 1] = y_pts[i]
 
 def raytrace_visibility_from_points(
     points_xyz,
