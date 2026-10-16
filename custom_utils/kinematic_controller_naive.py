@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import yaml
 from typing import Tuple
@@ -9,9 +11,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32MultiArray, Bool
+from std_msgs.msg import Float32MultiArray, Bool, String
 from rclpy.qos import QoSProfile
-from rclpy.qos import QoSReliabilityPolicy, QoSHistoryPolicy
+from rclpy.qos import QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 
 def clip_angle(theta) -> float:
     """Clip angle to [-pi, pi]"""
@@ -58,6 +60,10 @@ class ROSData:
     def get(self):
         return self.data
 
+    def clear(self):
+        self.data = None
+        self.last_time_received = None
+
     def set(self, data):
         current_time = rclpy.clock.Clock().now()
 
@@ -92,14 +98,17 @@ class ROSData:
         return valid
 
 class PDControllerNode(Node):
-    def __init__(self, config_path: str, robot_name: str, default_dt:float=0.0, steer:bool = False):
+    def __init__(self, config_path: str, robot_name: str, default_dt:float=0.0,
+                 steer:bool = False, simulation_episode_control: bool = False):
         super().__init__("pd_controller")
         WAYPOINT_TIMEOUT = 1  # seconds
         self.vel_msg = Twist()
         self.waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
         self.reached_goal = False
-        self.reverse_mode = False
         self.robot_name = robot_name
+        self.simulation_episode_control = simulation_episode_control
+        self.current_episode_id = None
+        self.ready_for_motion = not simulation_episode_control
         with open(config_path, "r") as f:
             deploy_config = yaml.safe_load(f)
         self.rate = deploy_config["controller_rate"]
@@ -141,13 +150,63 @@ class PDControllerNode(Node):
                                              VEL_TOPIC,
                                              10)
 
+        self.episode_sub = None
+        if self.simulation_episode_control:
+            reliable_transient_qos = QoSProfile(
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                history=QoSHistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+            self.episode_sub = self.create_subscription(
+                String,
+                "/isaacsim/episode",
+                self.callback_episode,
+                qos_profile=reliable_transient_qos,
+            )
+            self.publish_zero("waiting for a simulation episode")
+
         self.timer = self.create_timer(1.0 / self.rate, self.timer_callback)
         self.get_logger().info("Registered with master node. Waiting for waypoints...")
 
     def callback_drive(self, waypoint_msg: Float32MultiArray):
         """Callback function for the waypoint subscriber"""
+        if self.simulation_episode_control:
+            if self.current_episode_id is None:
+                self.get_logger().warning("Ignoring waypoints while waiting for simulation episode start")
+                return
+            else:
+                self.ready_for_motion = True
         self.get_logger().info("Setting waypoint")
         self.waypoint.set(waypoint_msg.data)
+
+    def callback_episode(self, episode_msg: String):
+        """Reset cached control state when a new simulation episode starts."""
+        try:
+            episode = json.loads(episode_msg.data)
+            episode_id = episode["episode_id"]
+            if not isinstance(episode_id, str) or not episode_id:
+                raise ValueError("episode_id must be a nonempty string")
+            if episode.get("state") != "started":
+                return
+            if episode.get("robot_type") != "nova_carter":
+                raise ValueError(f"unexpected robot type {episode.get('robot_type')} only supporting nova_carter")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            self.get_logger().error(f"callback_episode error: {exc}")
+            return
+        if episode_id != self.current_episode_id:
+            self.current_episode_id = episode_id
+            self.reached_goal = False
+            self.waypoint.clear()
+            self.ready_for_motion = False
+            self.publish_zero(f"reset for new episode {episode_id}")
+
+    def publish_zero(self, reason: str = ""):
+        """Clear and publish zero vel commands"""
+        self.vel_msg = Twist()
+        self.vel_out.publish(self.vel_msg)
+        if reason:
+            self.get_logger().error(f"publish_zero error: {reason}")
 
     def callback_reached_goal(self, reached_goal_msg: Bool):
         """Callback function for the reached goal subscriber"""
@@ -159,14 +218,19 @@ class PDControllerNode(Node):
             self.get_logger().info("Reached goal! Stopping...")
             rclpy.shutdown()
             return
-        
+
+        if self.simulation_episode_control and not self.ready_for_motion:
+            self.publish_zero()
+            return
+
         if self.waypoint.is_valid(verbose=True):
             v, w = pd_controller(self.waypoint.get(), self.max_v, self.max_w, self.dt, eps=1e-8)
-            if self.reverse_mode:
-                v *= -1
             self.vel_msg.linear.x = v
             self.vel_msg.angular.z = w
             self.get_logger().info(f"Publishing new velocity: {v}, {w}")
+        else:
+            self.vel_msg = Twist() # no velocity
+            self.waypoint.clear()
         self.vel_out.publish(self.vel_msg)
 
 def main():
@@ -174,15 +238,26 @@ def main():
     parser.add_argument("-r", "--robot", type=str, help="Robot Name",
                         default="husky")
     parser.add_argument("--config", type=str, help="yaml config file",
-                        default=str(Path(__file__).resolve().parents[3] / "steernav/config/robot.yaml"))
+                        default=str(Path(__file__).resolve().parents[2] / "configs/robot.yaml"))
     parser.add_argument("--steer", action="store_true",
                         help="listen to steered waypoint topic")
     parser.add_argument("--dt", type=float, help="dt for pd controller",
                         default=1.5)
+    parser.add_argument(
+        "--simulation-episode-control",
+        action="store_true",
+        help="enable episode reset and safe-zero behavior for the persistent simulation controller",
+    )
     args = parser.parse_args()
     print("robot name: ", args.robot)
     rclpy.init()
-    pd_controller_node = PDControllerNode(robot_name=args.robot, config_path=args.config, default_dt=args.dt, steer=args.steer)
+    pd_controller_node = PDControllerNode(
+        robot_name=args.robot,
+        config_path=args.config,
+        default_dt=args.dt,
+        steer=args.steer,
+        simulation_episode_control=args.simulation_episode_control,
+    )
     try:
         rclpy.spin(pd_controller_node)
     except KeyboardInterrupt:
