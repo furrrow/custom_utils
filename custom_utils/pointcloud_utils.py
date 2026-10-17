@@ -1355,19 +1355,45 @@ def merge_points(points_input:np.ndarray, projected_patch: np.ndarray,
     return merged
 
 
+def compensate_camera_motion(observed_relative_velocity, object_position_camera,
+                             robot_velocity_camera, robot_angular_velocity_camera):
+    """Recover object velocity in the current camera axes from apparent motion.
+
+    For a camera-frame point ``p``, camera rotation contributes ``-omega x p``
+    to its observed derivative. Camera translation contributes ``-v``.
+    """
+    return (
+        np.asarray(observed_relative_velocity, dtype=np.float64)
+        + np.asarray(robot_velocity_camera, dtype=np.float64)
+        + np.cross(
+            np.asarray(robot_angular_velocity_camera, dtype=np.float64),
+            np.asarray(object_position_camera, dtype=np.float64),
+        )
+    )
+
+
 def update_points(points_input, detection_queue: list[sv.Detections],
-                  last_n_records=2, robot_velocity_camera=np.array([0, 0, 0.1]),
+                  last_n_records=2, robot_velocity_camera=None,
+                  robot_angular_velocity_camera=None, detection_timestamps=None,
                   time_incr=0.1, time_look_ahead=1.0):
     """
     inflate detected objects' pointclouds in the direction of their travel
     :param points_input:
     :param detection_queue:
     :param robot_velocity_camera: in the CAMERA FRAME: x-right, y-down, z-forward
-    :param time_incr: how much time passes between frames. 19fps ~ 0.05
+    :param robot_angular_velocity_camera: camera angular velocity in camera axes
+    :param detection_timestamps: seconds for each detection; preferred over time_incr
+    :param time_incr: fallback interval when detection_timestamps is unavailable
     :param time_look_ahead:
     :return:
     """
     point_movement = []
+    if robot_velocity_camera is None:
+        robot_velocity_camera = np.zeros(3, dtype=np.float64)
+    if robot_angular_velocity_camera is None:
+        robot_angular_velocity_camera = np.zeros(3, dtype=np.float64)
+    if detection_timestamps is not None and len(detection_timestamps) != len(detection_queue):
+        raise ValueError("detection_timestamps must align with detection_queue")
     if len(detection_queue) < last_n_records:
         return points_input, point_movement
 
@@ -1379,12 +1405,15 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     for track_id in last_detection.tracker_id:
         median_depth_list = []
         frame_indices = []
+        observation_times = []
         # extract depth of the bounding boxes
         for frame_idx, detection in enumerate(detection_queue):
             pos_dict = detection.data
             if track_id in pos_dict:
                 median_depth_list.append(pos_dict[track_id])
                 frame_indices.append(frame_idx)
+                if detection_timestamps is not None:
+                    observation_times.append(detection_timestamps[frame_idx])
         # in case not enough detection on a specific id:
         if len(median_depth_list) < last_n_records:
             continue
@@ -1392,13 +1421,30 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         median_depth_list = np.asarray(median_depth_list[-last_n_records:])
         frame_indices = np.asarray(frame_indices[-last_n_records:])
         position_changes = np.diff(median_depth_list, axis=0)
-        frame_changes = np.diff(frame_indices)
-        delta_times = frame_changes * time_incr
+        if detection_timestamps is None:
+            frame_changes = np.diff(frame_indices)
+            delta_times = frame_changes * time_incr
+        else:
+            observation_times = np.asarray(
+                observation_times[-last_n_records:], dtype=np.float64
+            )
+            delta_times = np.diff(observation_times)
+        valid_intervals = np.isfinite(delta_times) & (delta_times > 1e-6)
+        if not np.any(valid_intervals):
+            continue
         # calculate velocity
-        observed_velocities = (position_changes / delta_times[:, None])
+        observed_velocities = (
+            position_changes[valid_intervals]
+            / delta_times[valid_intervals, None]
+        )
         # print(f"observed_velocities: {observed_velocities}")
         observed_relative_velocity = np.median(observed_velocities, axis=0,)
-        estimated_velocity = observed_relative_velocity + robot_velocity_camera
+        estimated_velocity = compensate_camera_motion(
+            observed_relative_velocity,
+            median_depth_list[-1],
+            robot_velocity_camera,
+            robot_angular_velocity_camera,
+        )
 
         if not np.all(np.isfinite(estimated_velocity)):
             print("nan or inf velocity for estimated_velocity:", estimated_velocity)

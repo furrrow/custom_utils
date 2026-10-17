@@ -20,8 +20,8 @@ import cv2
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib
 from matplotlib.lines import Line2D
-# matplotlib.use("Agg")
-matplotlib.use("TkAgg")
+# The application chooses its backend before importing this module. Forcing a
+# GUI backend here prevents the ROS inference node from starting headlessly.
 import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
