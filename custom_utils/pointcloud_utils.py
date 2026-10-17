@@ -867,8 +867,25 @@ def get_inbound_points(points_xyz, grid:BEVGrid):
 
     return points[in_bounds]
 
+def _find_min_bin_hits(bin_idx, ranges, x_pts, y_pts, hit_ranges, hit_points):
+    """Store the nearest point in each angular bin in the provided arrays."""
+    if len(bin_idx) == 0:
+        return
+
+    # Sort by bin first and range second. The first entry for each bin is its
+    # nearest hit, matching the former Numba loop without requiring Numba.
+    order = np.lexsort((ranges, bin_idx))
+    sorted_bins = bin_idx[order]
+    _, first_indices = np.unique(sorted_bins, return_index=True)
+    nearest_indices = order[first_indices]
+    nearest_bins = bin_idx[nearest_indices]
+
+    hit_ranges[nearest_bins] = ranges[nearest_indices]
+    hit_points[nearest_bins, 0] = x_pts[nearest_indices]
+    hit_points[nearest_bins, 1] = y_pts[nearest_indices]
+
 # @numba.njit
-# def _find_min_bin_hits(bin_idx, ranges, x_pts, y_pts, hit_ranges, hit_points):
+# def _find_min_bin_hits_numba(bin_idx, ranges, x_pts, y_pts, hit_ranges, hit_points):
 #     for i in numba.prange(len(bin_idx)):
 #         b = bin_idx[i]
 #         r = ranges[i]
