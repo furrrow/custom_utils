@@ -1386,8 +1386,9 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                   robot_angular_velocity_camera=None, detection_timestamps=None,
                   camera_poses_world=None,
                   time_incr=0.1, time_look_ahead=1.0,
-                  min_dynamic_speed=0.1, max_missed_records=1,
-                  sweep_steps=5, velocity_window=None, debug_motion=False):
+                  min_dynamic_speed=0.1, max_dynamic_speed=3.0,
+                  max_missed_records=1, sweep_steps=5, velocity_window=None,
+                  min_dynamic_observations=3, debug_motion=False):
     """
     Inflate moving objects' point clouds over their predicted swept path.
     :param points_input:
@@ -1400,10 +1401,14 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     :param time_incr: fallback interval when detection_timestamps is unavailable
     :param time_look_ahead:
     :param min_dynamic_speed: minimum XZ ground-plane speed in metres/second
+    :param max_dynamic_speed: maximum plausible XZ ground-plane speed; faster
+        estimates are treated as tracking/depth jumps and are not projected
     :param max_missed_records: retain a track for this many missed detector frames
     :param sweep_steps: number of interleaved positions along the predicted path
     :param velocity_window: maximum observations in the timestamp-aware velocity
         fit; defaults to last_n_records
+    :param min_dynamic_observations: observations required before a track can be
+        classified as dynamic; velocity is still estimated with fewer samples
     :param debug_motion: print the inputs and result of each velocity estimate
     :return:
     """
@@ -1422,6 +1427,17 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         velocity_window = last_n_records
     if velocity_window < last_n_records:
         raise ValueError("velocity_window must be at least last_n_records")
+    if min_dynamic_observations < last_n_records:
+        raise ValueError(
+            "min_dynamic_observations must be at least last_n_records"
+        )
+    if (
+        not np.isfinite(max_dynamic_speed)
+        or max_dynamic_speed <= min_dynamic_speed
+    ):
+        raise ValueError(
+            "max_dynamic_speed must be finite and greater than min_dynamic_speed"
+        )
     if len(detection_queue) < last_n_records:
         return points_input, point_movement
 
@@ -1465,6 +1481,7 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         # in case not enough detection on a specific id:
         if len(median_depth_list) < last_n_records:
             continue
+        track_observations = len(median_depth_list)
         # calculate position change over time
         median_depth_list = np.asarray(median_depth_list[-velocity_window:])
         frame_indices = np.asarray(frame_indices[-velocity_window:])
@@ -1534,6 +1551,16 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         # Camera X/Z span the navigation plane; camera Y is vertical. Detect
         # crossing and receding obstacles as well as approaching ones.
         ground_speed = np.linalg.norm(estimated_velocity[[0, 2]])
+        speed = np.linalg.norm(estimated_velocity)
+        has_dynamic_evidence = (
+            track_observations >= int(min_dynamic_observations)
+        )
+        plausible_speed = speed <= float(max_dynamic_speed)
+        is_dynamic = (
+            has_dynamic_evidence
+            and plausible_speed
+            and ground_speed >= float(min_dynamic_speed)
+        )
         prediction_horizon = float(time_look_ahead) + observation_age
         future_shift = estimated_velocity * prediction_horizon
         if debug_motion:
@@ -1548,16 +1575,20 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                 f"raw_delta_cam={raw_delta.tolist()} "
                 f"aligned_delta_cam={None if aligned_delta is None else aligned_delta.tolist()} "
                 f"compensation_mode={'pose_delta' if pose_aligned_positions is not None else 'twist'} "
+                f"track_observations={track_observations} "
                 f"fit_observations={len(observation_times)} "
                 f"estimated_object_cam={estimated_velocity.tolist()} "
                 f"ground_speed={ground_speed:.3f} "
-                f"dynamic={ground_speed >= float(min_dynamic_speed)} "
+                f"speed={speed:.3f} "
+                f"dynamic_evidence={has_dynamic_evidence} "
+                f"plausible_speed={plausible_speed} "
+                f"dynamic={is_dynamic} "
                 f"observation_age={observation_age:.3f} "
                 f"prediction_horizon={prediction_horizon:.3f} "
                 f"future_shift_cam={future_shift.tolist()}",
                 flush=True,
             )
-        if ground_speed < float(min_dynamic_speed):
+        if not is_dynamic:
             continue
         # extract points from bounding box, project forward to future position
         matches = np.flatnonzero(source_detection.tracker_id == track_id)
