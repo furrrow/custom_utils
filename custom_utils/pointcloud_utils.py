@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 from dataclasses import dataclass
-import time
 # import numba
 
 @dataclass
@@ -771,7 +770,6 @@ def rasterize_organized_occluders(
     at range. This fills those sub-pixel BEV gaps for visibility ray stopping
     without treating every return as an obstacle.
     """
-    t0 = time.perf_counter()
     pts = np.asarray(points_xyz, dtype=np.float32)
     H, W = grid.height, grid.width
 
@@ -782,8 +780,6 @@ def rasterize_organized_occluders(
         occluder[rows[in_bounds], cols[in_bounds]] = True
         return occluder
 
-    # t1 = time.perf_counter()
-    # print(f"initialize: {(t1 - t0) * 1000:.2f} ms")
 
     finite = np.isfinite(pts).all(axis=-1)
     x_pts, y_pts = pts[..., 0], pts[..., 1]
@@ -802,8 +798,6 @@ def rasterize_organized_occluders(
     rows = np.zeros(pts.shape[:2], dtype=np.int32)
     cols = np.zeros(pts.shape[:2], dtype=np.int32)
 
-    # t2 = time.perf_counter()
-    # print(f"finite/roi: {(t2 - t1) * 1000:.2f} ms")
 
     rows[roi] = np.clip(np.floor((y_pts[roi] - grid.y_min) * inv_res), 0, H - 1).astype(np.int32)
     cols[roi] = np.clip(np.floor((x_pts[roi] - grid.x_min) * inv_res), 0, W - 1).astype(np.int32)
@@ -817,8 +811,6 @@ def rasterize_organized_occluders(
     kernel_size = int(max_neighbor_distance_m // grid.resolution) + 1
     kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
     occluder = cv2.morphologyEx(occluder, cv2.MORPH_CLOSE, kernel,)
-    # t4 = time.perf_counter()
-    # print(f"rasterize: new occluder using cv2.morphologyEx: {(t4 - t2) * 1000:.2f} ms")
     return occluder.astype(bool)
     # shortcut portion: ======================================================
 
@@ -827,9 +819,6 @@ def rasterize_organized_occluders(
         (slice(None), slice(None, -1), slice(None), slice(1, None)),  # Horizontal
         (slice(None, -1), slice(None), slice(1, None), slice(None)),  # Vertical
     )
-
-    t3 = time.perf_counter()
-    # print(f"projection, neighbor slices: {(t3 - t2) * 1000:.2f} ms")
 
     for r_a, c_a, r_b, c_b in neighbor_slices:
         roi_a, roi_b = roi[r_a, c_a], roi[r_b, c_b]
@@ -848,8 +837,6 @@ def rasterize_organized_occluders(
                 cols_b[needs_line],
                 occluder
             )
-    t4 = time.perf_counter()
-    print(f"rasterize_find neighbors: {(t4 - t3) * 1000:.2f} ms")
     return occluder
 
 def get_inbound_points(points_xyz, grid:BEVGrid):
@@ -953,7 +940,6 @@ def raytrace_visibility_from_points(
     if len(fov_points) == 0:
         if len(occupancy_points) == 0:
             return occupied, visible_free, occupied | visible_free
-        print("no fov_points left, defaulting back to occupancy_points")
         fov_points = occupancy_points
 
     # sensor x y r c
@@ -1020,8 +1006,6 @@ def raytrace_visibility_from_points(
     angles = angle_min + np.arange(num_bins, dtype=np.float32) * angle_increment
     cos_a, sin_a = np.cos(angles), np.sin(angles)
 
-    # t2 = time.perf_counter()
-    # print(f"raytrace: _find_min_bin_hits: {(t2 - t1) * 1000:.2f} ms")
 
     # Vectorized boundary intersections
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -1049,8 +1033,6 @@ def raytrace_visibility_from_points(
     final_y = np.where(has_hit, hit_points[:, 1], boundary_y)
     final_ranges = np.where(has_hit, hit_ranges, np.hypot(final_x - sensor_x, final_y - sensor_y))
 
-    # t3 = time.perf_counter()
-    # print(f"raytrace: boundary intersections: {(t3 - t2) * 1000:.2f} ms")
 
     # Single-pass OpenCV batch rasterization
     wedge_mask = np.zeros((H, W), dtype=np.uint8)
@@ -1086,8 +1068,6 @@ def raytrace_visibility_from_points(
     visible_free = wedge_mask.astype(bool)
     visible_free[occluder_mask] = False
     known = occluder_mask | visible_free
-    # t4 = time.perf_counter()
-    # print(f"raytrace: fill_between_beams: {(t4 - t3) * 1000:.2f} ms")
     return occluder_mask, visible_free, known
 
 def compute_esdf_from_occupancy(
@@ -1229,7 +1209,6 @@ def pointcloud_to_esdf_pipeline(
     Returns:
         dict containing all intermediate maps
     """
-    # t0 = time.perf_counter()
     pts_robot_nominal = transform_points(points_xyz, R=R, t=t)
     sensor_position = np.zeros(3, dtype=np.float32) if t is None else np.asarray(t, dtype=np.float32)
     ground_info = {
@@ -1245,8 +1224,6 @@ def pointcloud_to_esdf_pipeline(
         "inlier_rmse_m": None,
     }
     pts_robot = pts_robot_nominal
-    # t1 = time.perf_counter()
-    # print(f"1. transform_points: {(t1 - t0) * 1000:.2f} ms")
 
     if ground_alignment:
         correction, ground_info = estimate_ground_plane_correction(
@@ -1268,8 +1245,6 @@ def pointcloud_to_esdf_pipeline(
             smoothing=ground_alignment_smoothing,
         )
         pts_robot = transform_points(pts_robot_nominal - sensor_position, R=correction, t=sensor_position)
-    # t2 = time.perf_counter()
-    # print(f"2. ground_alignment: {(t2 - t1) * 1000:.2f} ms")
 
     pts_filt, valid_mask = filter_points_by_height_and_roi(
         pts_robot,
@@ -1283,8 +1258,6 @@ def pointcloud_to_esdf_pipeline(
     )
     pts_occluder = pts_robot.astype(np.float32, copy=True)
     pts_occluder.reshape(-1, 3)[~valid_mask] = np.nan
-    # t3 = time.perf_counter()
-    # print(f"3. filter_points_by_height_and_roi: {(t3 - t2) * 1000:.2f} ms")
 
     occupied, visible_free, known = raytrace_visibility_from_points(
         pts_filt,
@@ -1300,17 +1273,11 @@ def pointcloud_to_esdf_pipeline(
         angle_max=visibility_angle_max,
         angle_increment=visibility_angle_increment,
     )
-    # t4 = time.perf_counter()
-    # print(f"4. raytrace_visibility_from_points: {(t4 - t3) * 1000:.2f} ms")
 
     esdf = compute_esdf_from_occupancy(occupied, known, resolution=resolution, signed=True)
-    # t5 = time.perf_counter()
-    # print(f"5. compute_esdf_from_occupancy: {(t5 - t4) * 1000:.2f} ms")
 
     clearance = inflate_obstacles_via_esdf(esdf, robot_radius=robot_radius)
     unknown = build_unknown_mask(known)
-    # t6 = time.perf_counter()
-    # print(f"6. inflate obstacle, build unknown mask: {(t6 - t5) * 1000:.2f} ms")
 
     return {
         "points_robot_nominal": pts_robot_nominal,
@@ -1395,12 +1362,32 @@ def compensate_camera_motion(observed_relative_velocity, object_position_camera,
     )
 
 
+def transform_point_between_camera_poses(point_camera, world_from_camera,
+                                         target_world_from_camera):
+    """Express a camera-frame point in a target camera frame.
+
+    Both poses map camera coordinates into the same fixed world/odometry frame.
+    """
+    point_camera = np.asarray(point_camera, dtype=np.float64)
+    world_from_camera = np.asarray(world_from_camera, dtype=np.float64)
+    target_world_from_camera = np.asarray(target_world_from_camera, dtype=np.float64)
+    if point_camera.shape != (3,):
+        raise ValueError("point_camera must have shape (3,)")
+    if world_from_camera.shape != (4, 4) or target_world_from_camera.shape != (4, 4):
+        raise ValueError("camera poses must have shape (4, 4)")
+
+    point_homogeneous = np.r_[point_camera, 1.0]
+    target_from_world = np.linalg.inv(target_world_from_camera)
+    return (target_from_world @ world_from_camera @ point_homogeneous)[:3]
+
+
 def update_points(points_input, detection_queue: list[sv.Detections],
                   last_n_records=2, robot_velocity_camera=None,
                   robot_angular_velocity_camera=None, detection_timestamps=None,
+                  camera_poses_world=None,
                   time_incr=0.1, time_look_ahead=1.0,
-                  min_dynamic_speed=0.15, max_missed_records=1,
-                  sweep_steps=5):
+                  min_dynamic_speed=0.1, max_missed_records=1,
+                  sweep_steps=5, velocity_window=None, debug_motion=False):
     """
     Inflate moving objects' point clouds over their predicted swept path.
     :param points_input:
@@ -1408,11 +1395,16 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     :param robot_velocity_camera: in the CAMERA FRAME: x-right, y-down, z-forward
     :param robot_angular_velocity_camera: camera angular velocity in camera axes
     :param detection_timestamps: seconds for each detection; preferred over time_incr
+    :param camera_poses_world: world-from-camera pose for each detection timestamp;
+        when supplied, positions are aligned with pose deltas instead of twist compensation
     :param time_incr: fallback interval when detection_timestamps is unavailable
     :param time_look_ahead:
     :param min_dynamic_speed: minimum XZ ground-plane speed in metres/second
     :param max_missed_records: retain a track for this many missed detector frames
     :param sweep_steps: number of interleaved positions along the predicted path
+    :param velocity_window: maximum observations in the timestamp-aware velocity
+        fit; defaults to last_n_records
+    :param debug_motion: print the inputs and result of each velocity estimate
     :return:
     """
     point_movement = []
@@ -1422,8 +1414,14 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         robot_angular_velocity_camera = np.zeros(3, dtype=np.float64)
     if detection_timestamps is not None and len(detection_timestamps) != len(detection_queue):
         raise ValueError("detection_timestamps must align with detection_queue")
+    if camera_poses_world is not None and len(camera_poses_world) != len(detection_queue):
+        raise ValueError("camera_poses_world must align with detection_queue")
     if last_n_records < 2:
         raise ValueError("last_n_records must be at least 2")
+    if velocity_window is None:
+        velocity_window = last_n_records
+    if velocity_window < last_n_records:
+        raise ValueError("velocity_window must be at least last_n_records")
     if len(detection_queue) < last_n_records:
         return points_input, point_movement
 
@@ -1468,40 +1466,97 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         if len(median_depth_list) < last_n_records:
             continue
         # calculate position change over time
-        median_depth_list = np.asarray(median_depth_list[-last_n_records:])
-        frame_indices = np.asarray(frame_indices[-last_n_records:])
-        position_changes = np.diff(median_depth_list, axis=0)
+        median_depth_list = np.asarray(median_depth_list[-velocity_window:])
+        frame_indices = np.asarray(frame_indices[-velocity_window:])
         if detection_timestamps is None:
-            frame_changes = np.diff(frame_indices)
-            delta_times = frame_changes * time_incr
+            observation_times = frame_indices.astype(np.float64) * float(time_incr)
         else:
             observation_times = np.asarray(
-                observation_times[-last_n_records:], dtype=np.float64
+                observation_times[-velocity_window:], dtype=np.float64
             )
-            delta_times = np.diff(observation_times)
-        valid_intervals = np.isfinite(delta_times) & (delta_times > 1e-6)
-        if not np.any(valid_intervals):
+        delta_times = np.diff(observation_times)
+        pose_aligned_positions = None
+        if camera_poses_world is not None:
+            selected_poses = [camera_poses_world[idx] for idx in frame_indices]
+            target_pose = selected_poses[-1]
+            if target_pose is None or any(pose is None for pose in selected_poses):
+                continue
+            pose_aligned_positions = median_depth_list.copy()
+            for position_idx, pose in enumerate(selected_poses[:-1]):
+                pose_aligned_positions[position_idx] = transform_point_between_camera_poses(
+                    median_depth_list[position_idx], pose, target_pose
+                )
+        fit_positions = (
+            pose_aligned_positions
+            if pose_aligned_positions is not None
+            else median_depth_list
+        )
+        if (
+            not np.all(np.isfinite(observation_times))
+            or not np.all(np.isfinite(fit_positions))
+            or not np.all(delta_times > 1e-6)
+        ):
             continue
-        # calculate velocity
-        observed_velocities = (
-            position_changes[valid_intervals]
-            / delta_times[valid_intervals, None]
+
+        # Fit one robust constant velocity across the recent observations using
+        # the component-wise median of all pairwise slopes. Two samples preserve
+        # immediate motion detection; later samples smooth ordinary jitter and
+        # prevent one clipped/noisy bounding box from dominating the estimate.
+        pairwise_velocities = []
+        for earlier_idx in range(len(observation_times) - 1):
+            later_times = observation_times[earlier_idx + 1:]
+            intervals = later_times - observation_times[earlier_idx]
+            pairwise_velocities.extend(
+                (fit_positions[earlier_idx + 1:] - fit_positions[earlier_idx])
+                / intervals[:, None]
+            )
+        observed_relative_velocity = np.median(
+            np.asarray(pairwise_velocities), axis=0
         )
-        # print(f"observed_velocities: {observed_velocities}")
-        observed_relative_velocity = np.median(observed_velocities, axis=0,)
-        estimated_velocity = compensate_camera_motion(
-            observed_relative_velocity,
-            median_depth_list[-1],
-            robot_velocity_camera,
-            robot_angular_velocity_camera,
-        )
+        if pose_aligned_positions is not None:
+            estimated_velocity = observed_relative_velocity
+        else:
+            estimated_velocity = compensate_camera_motion(
+                observed_relative_velocity,
+                median_depth_list[-1],
+                robot_velocity_camera,
+                robot_angular_velocity_camera,
+            )
 
         if not np.all(np.isfinite(estimated_velocity)):
-            print("nan or inf velocity for estimated_velocity:", estimated_velocity)
+            if debug_motion:
+                print(
+                    "[motion-debug] non-finite estimated velocity "
+                    f"track={track_id} velocity={estimated_velocity.tolist()}",
+                    flush=True,
+                )
             continue
         # Camera X/Z span the navigation plane; camera Y is vertical. Detect
         # crossing and receding obstacles as well as approaching ones.
         ground_speed = np.linalg.norm(estimated_velocity[[0, 2]])
+        prediction_horizon = float(time_look_ahead) + observation_age
+        future_shift = estimated_velocity * prediction_horizon
+        if debug_motion:
+            raw_delta = median_depth_list[-1] - median_depth_list[-2]
+            aligned_delta = (
+                None if pose_aligned_positions is None else
+                pose_aligned_positions[-1] - pose_aligned_positions[-2]
+            )
+            print(
+                "[motion-debug] "
+                f"track={track_id} dt={delta_times.tolist()} "
+                f"raw_delta_cam={raw_delta.tolist()} "
+                f"aligned_delta_cam={None if aligned_delta is None else aligned_delta.tolist()} "
+                f"compensation_mode={'pose_delta' if pose_aligned_positions is not None else 'twist'} "
+                f"fit_observations={len(observation_times)} "
+                f"estimated_object_cam={estimated_velocity.tolist()} "
+                f"ground_speed={ground_speed:.3f} "
+                f"dynamic={ground_speed >= float(min_dynamic_speed)} "
+                f"observation_age={observation_age:.3f} "
+                f"prediction_horizon={prediction_horizon:.3f} "
+                f"future_shift_cam={future_shift.tolist()}",
+                flush=True,
+            )
         if ground_speed < float(min_dynamic_speed):
             continue
         # extract points from bounding box, project forward to future position
@@ -1518,7 +1573,6 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         if x2 <= x1 or y2 <= y1:
             continue
         box_3d_pts = points_input[y1:y2, x1:x2]
-        future_shift = estimated_velocity * (float(time_look_ahead) + observation_age)
         box_project_forward = _sweep_point_patch(
             box_3d_pts, future_shift, num_steps=sweep_steps
         )

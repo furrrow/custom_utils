@@ -220,6 +220,7 @@ def plot_esdf_view(
     *,
     paths: Sequence[PathOverlay] = (),
     movements: Sequence[tuple[np.ndarray, np.ndarray]] = (),
+    selected_waypoint: np.ndarray | None = None,
     cmap: Any = custom_cmap,
     colorbar_label: str | None = None,
     publication_style: bool = False,
@@ -232,6 +233,15 @@ def plot_esdf_view(
     )
     ax.invert_xaxis()
     plot_motion(ax, movements, publication_style=publication_style)
+    if selected_waypoint is not None:
+        waypoint = np.asarray(selected_waypoint).reshape(-1)
+        if waypoint.size < 2:
+            raise ValueError("selected_waypoint must contain at least x and y")
+        ax.scatter(
+            waypoint[1], waypoint[0], marker="*", s=220, c="magenta",
+            edgecolors="black", linewidths=1.2, label="Selected waypoint",
+            zorder=11,
+        )
     return plot_paths(ax, paths)
 
 
@@ -240,10 +250,17 @@ def add_esdf_legend(
     path_lines: Sequence[Line2D],
     *,
     has_movements: bool,
+    has_selected_waypoint: bool = False,
 ) -> None:
     robot = Line2D([], [], marker="X", linestyle="None", markersize=11,
                    markerfacecolor="yellow", markeredgecolor="black", label="Robot")
     handles: list[Line2D] = [robot, *path_lines]
+    if has_selected_waypoint:
+        handles.append(
+            Line2D([], [], marker="*", linestyle="None", markersize=15,
+                   markerfacecolor="magenta", markeredgecolor="black",
+                   label="Selected waypoint")
+        )
     if has_movements:
         handles.extend((
             Line2D([], [], marker="s", linestyle="None", markersize=10,
@@ -302,11 +319,15 @@ def plot_camera_path_view(
     T_cam_from_base: np.ndarray,
     *,
     bbox_result: dict[str, np.ndarray] | None = None,
+    tracker_ids: Sequence[int] | np.ndarray | None = None,
     image_size: tuple[int, int] | None = None,
 ) -> None:
     image = rgb
     if bbox_result is not None:
-        image = plot_bbox(image, bbox_result, show_plot=False, return_img=True)
+        image = plot_bbox(
+            image, bbox_result, tracker_id=tracker_ids,
+            show_plot=False, return_img=True,
+        )
     if image_size is not None:
         image = cv2.resize(image, dsize=image_size, interpolation=cv2.INTER_CUBIC)
     if paths:
@@ -342,6 +363,8 @@ def visualize_path_debug(
     after_path: np.ndarray,
     point_movement_bev: list[tuple[np.ndarray, np.ndarray]],
     args: argparse.Namespace,
+    tracker_ids: Sequence[int] | np.ndarray | None = None,
+    selected_waypoint: np.ndarray | None = None,
 ) -> np.ndarray:
     view = BevView.from_args(args)
 
@@ -354,7 +377,8 @@ def visualize_path_debug(
     )
     plot_camera_path_view(
         axes[0, 0], rgb, [before_path, after_path], cam_matrix, T_cam_from_base,
-        bbox_result=bbox_result, image_size=(args.img_w, args.img_h),
+        bbox_result=bbox_result, tracker_ids=tracker_ids,
+        image_size=(args.img_w, args.img_h),
     )
     axes[0, 0].set_title("Img with Bounding Boxes and paths")
     plot_esdf_view(
@@ -364,6 +388,7 @@ def visualize_path_debug(
             PathOverlay(after_path, "green"),
         ),
         movements=point_movement_bev,
+        selected_waypoint=selected_waypoint,
     )
     plot_depth_view(axes[1, 0], depth)
     plot_occupancy_view(
@@ -415,6 +440,7 @@ def visualize_esdf(
     before_path: np.ndarray | None = None,
     after_path: np.ndarray | None = None,
     point_movement_bev: Sequence[tuple[np.ndarray, np.ndarray]] = (),
+    selected_waypoint: np.ndarray | None = None,
 ) -> np.ndarray:
     paths = []
     if before_path is not None:
@@ -429,12 +455,16 @@ def visualize_esdf(
         BevView.from_args(args),
         paths=paths,
         movements=point_movement_bev,
+        selected_waypoint=selected_waypoint,
         cmap="viridis",
         colorbar_label="ESDF (m)",
         publication_style=True,
     )
 
-    add_esdf_legend(ax, path_lines, has_movements=len(point_movement_bev) > 0)
+    add_esdf_legend(
+        ax, path_lines, has_movements=len(point_movement_bev) > 0,
+        has_selected_waypoint=selected_waypoint is not None,
+    )
 
     return figure_to_rgb(fig, tight_layout=True)
 
@@ -449,6 +479,8 @@ def visualize_camera_esdf(
     before_path: np.ndarray | None = None,
     after_path: np.ndarray | None = None,
     point_movement_bev: Sequence[tuple[np.ndarray, np.ndarray]] = (),
+    tracker_ids: Sequence[int] | np.ndarray | None = None,
+    selected_waypoint: np.ndarray | None = None,
 ) -> np.ndarray:
     """Render the camera detections and regular ESDF view side by side."""
     camera_paths = [path for path in (before_path, after_path) if path is not None]
@@ -461,17 +493,20 @@ def visualize_camera_esdf(
     fig, axes = plt.subplots(1, 2, figsize=(20, 10), dpi=180)
     plot_camera_path_view(
         axes[0], rgb, camera_paths, cam_matrix, T_cam_from_base,
-        bbox_result=bbox_result, image_size=(args.img_w, args.img_h),
+        bbox_result=bbox_result, tracker_ids=tracker_ids,
+        image_size=(args.img_w, args.img_h),
     )
     axes[0].set_title("Camera detections and paths")
 
     path_lines = plot_esdf_view(
         axes[1], esdf_result["esdf"], BevView.from_args(args),
         paths=esdf_paths, movements=point_movement_bev, cmap="viridis",
-        colorbar_label="ESDF (m)", publication_style=True,
+        selected_waypoint=selected_waypoint, colorbar_label="ESDF (m)",
+        publication_style=True,
     )
     add_esdf_legend(
         axes[1], path_lines, has_movements=len(point_movement_bev) > 0,
+        has_selected_waypoint=selected_waypoint is not None,
     )
     return figure_to_rgb(fig, tight_layout=True)
 
@@ -490,6 +525,7 @@ def visualize_static_dynamic_paths(
         point_movement_bev: list[tuple[np.ndarray, np.ndarray]],
         idx: int,
         args: argparse.Namespace,
+        tracker_ids: Sequence[int] | np.ndarray | None = None,
 ) -> np.ndarray:
     view = BevView.from_args(args)
     filtered = dynamic_esdf_result["points_filtered"]
@@ -507,7 +543,8 @@ def visualize_static_dynamic_paths(
     )
     plot_camera_path_view(
         axes[0, 0], rgb, [before_path, dynamic_path], cam_matrix, T_cam_from_base,
-        bbox_result=bbox_result, image_size=(args.img_w, args.img_h),
+        bbox_result=bbox_result, tracker_ids=tracker_ids,
+        image_size=(args.img_w, args.img_h),
     )
     axes[0, 0].set_title("Img with Bounding Boxes and paths")
 
