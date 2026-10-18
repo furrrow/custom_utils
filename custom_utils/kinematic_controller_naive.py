@@ -3,12 +3,13 @@ import numpy as np
 import yaml
 from typing import Tuple
 import argparse
+import time
 from pathlib import Path
 
 # ROS2
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
-from rclpy.time import Time
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray, Bool, String
 from rclpy.qos import QoSProfile
@@ -64,12 +65,12 @@ class ROSData:
         self.last_time_received = None
 
     def set(self, data):
-        current_time = rclpy.clock.Clock().now()
+        current_time = time.monotonic()
 
         time_waited = float('inf')
         if self.last_time_received is not None:
             # Update time_waited with the actual time waited, otherwise stick to a huge value. This resets the data
-            time_waited = (current_time - Time(seconds=self.last_time_received)).nanoseconds / 1e9  # Convert to seconds
+            time_waited = current_time - self.last_time_received
 
         if self.queue_size == 1:
             self.data = data
@@ -79,15 +80,15 @@ class ROSData:
             if len(self.data) == self.queue_size:
                 self.data.pop(0)
             self.data.append(data)
-        self.last_time_received = current_time.nanoseconds / 1e9  # Store time in seconds
+        self.last_time_received = current_time
 
     def is_valid(self, verbose: bool = False):
-        current_time = rclpy.clock.Clock().now()
+        current_time = time.monotonic()
 
         time_waited = float('inf')
         if self.last_time_received is not None:
             # Update time_waited with the actual time waited, otherwise stick to a huge value. This resets the data
-            time_waited = (current_time - Time(seconds=self.last_time_received)).nanoseconds / 1e9  # Convert to seconds
+            time_waited = current_time - self.last_time_received
 
         valid = time_waited < self.timeout
         if self.queue_size > 1:
@@ -164,7 +165,11 @@ class PDControllerNode(Node):
             )
             self.publish_zero("waiting for a simulation episode")
 
-        self.timer = self.create_timer(1.0 / self.rate, self.timer_callback)
+        self.timer = self.create_timer(
+            1.0 / self.rate,
+            self.timer_callback,
+            clock=Clock(clock_type=ClockType.STEADY_TIME),
+        )
         self.get_logger().info("Registered with master node. Waiting for waypoints...")
 
     def callback_drive(self, waypoint_msg: Float32MultiArray):
@@ -246,9 +251,11 @@ def main():
         action="store_true",
         help="enable episode reset and safe-zero behavior for the persistent simulation controller",
     )
-    args = parser.parse_args()
+    args, ros_args = parser.parse_known_args()
+    if ros_args and ros_args[0] != "--ros-args":
+        parser.error(f"Unrecognized arguments: {ros_args}")
     print("robot name: ", args.robot)
-    rclpy.init()
+    rclpy.init(args=ros_args)
     pd_controller_node = PDControllerNode(
         robot_name=args.robot,
         config_path=args.config,
