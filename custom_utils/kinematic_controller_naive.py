@@ -99,11 +99,13 @@ class ROSData:
 
 class PDControllerNode(Node):
     def __init__(self, config_path: str, robot_name: str, default_dt:float=0.0,
-                 steer:bool = False, simulation_episode_control: bool = False):
+                 steer:bool = False, simulation_episode_control: bool = False,
+                 waypoint_timeout: float = 5.0):
         super().__init__("pd_controller")
-        WAYPOINT_TIMEOUT = 1  # seconds
+        if not np.isfinite(waypoint_timeout) or waypoint_timeout <= 0:
+            raise ValueError("waypoint_timeout must be finite and greater than zero")
         self.vel_msg = Twist()
-        self.waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
+        self.waypoint = ROSData(waypoint_timeout, name="waypoint")
         self.reached_goal = False
         self.robot_name = robot_name
         self.simulation_episode_control = simulation_episode_control
@@ -134,6 +136,9 @@ class PDControllerNode(Node):
         else:
             self.dt = 1 / self.rate
         self.get_logger().info(f"setting dt value of controller to {self.dt}")
+        self.get_logger().info(
+            f"setting waypoint timeout to {waypoint_timeout:.2f} seconds"
+        )
 
         self.waypoint_sub = self.create_subscription(Float32MultiArray, 
                                                      WAYPOINT_TOPIC,
@@ -247,6 +252,15 @@ def main():
     parser.add_argument("--dt", type=float, help="dt for pd controller",
                         default=1.5)
     parser.add_argument(
+        "--waypoint-timeout",
+        type=float,
+        default=5.0,
+        help=(
+            "seconds to retain the latest waypoint while waiting for the next "
+            "inference result"
+        ),
+    )
+    parser.add_argument(
         "--simulation-episode-control",
         action="store_true",
         help="enable episode reset and safe-zero behavior for the persistent simulation controller",
@@ -262,6 +276,7 @@ def main():
         default_dt=args.dt,
         steer=args.steer,
         simulation_episode_control=args.simulation_episode_control,
+        waypoint_timeout=args.waypoint_timeout,
     )
     try:
         rclpy.spin(pd_controller_node)
