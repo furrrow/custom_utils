@@ -1196,6 +1196,7 @@ def pointcloud_to_esdf_pipeline(
     visibility_angle_min=None,
     visibility_angle_max=None,
     visibility_angle_increment=None,
+    dynamic_projection_mask=None,
 ):
     """
     End-to-end pipeline:
@@ -1279,6 +1280,25 @@ def pointcloud_to_esdf_pipeline(
     clearance = inflate_obstacles_via_esdf(esdf, robot_radius=robot_radius)
     unknown = build_unknown_mask(known)
 
+    dynamic_occupied = np.zeros_like(occupied, dtype=bool)
+    if dynamic_projection_mask is not None:
+        projection_mask = np.asarray(dynamic_projection_mask, dtype=bool)
+        if projection_mask.shape != np.asarray(points_xyz).shape[:2]:
+            raise ValueError(
+                "dynamic_projection_mask must match the point cloud image shape"
+            )
+        dynamic_points = pts_robot.reshape(-1, 3)[
+            projection_mask.reshape(-1) & valid_mask
+        ]
+        if len(dynamic_points) > 0:
+            grid = BEVGrid.create(x_min, x_max, y_min, y_max, resolution)
+            dynamic_rows, dynamic_cols, dynamic_in_bounds = points_to_bev_indices(
+                dynamic_points, grid
+            )
+            dynamic_occupied[
+                dynamic_rows[dynamic_in_bounds], dynamic_cols[dynamic_in_bounds]
+            ] = True
+
     return {
         "points_robot_nominal": pts_robot_nominal,
         "points_robot": pts_robot,
@@ -1288,6 +1308,7 @@ def pointcloud_to_esdf_pipeline(
         "visible_free_mask": visible_free,
         "known_mask": known,
         "unknown_mask": unknown,
+        "dynamic_occupied_mask": dynamic_occupied,
         "esdf": esdf,
         "clearance": clearance,
         "ground_alignment": ground_info,
@@ -1388,7 +1409,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                   time_incr=0.1, time_look_ahead=1.0,
                   min_dynamic_speed=0.1, max_dynamic_speed=3.0,
                   max_missed_records=1, sweep_steps=5, velocity_window=None,
-                  min_dynamic_observations=3, debug_motion=False):
+                  min_dynamic_observations=3, min_velocity_interval=0.075,
+                  debug_motion=False):
     """
     Inflate moving objects' point clouds over their predicted swept path.
     :param points_input:
@@ -1409,6 +1431,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         fit; defaults to last_n_records
     :param min_dynamic_observations: observations required before a track can be
         classified as dynamic; velocity is still estimated with fewer samples
+    :param min_velocity_interval: minimum time baseline used by the velocity
+        fit. Shorter baselines amplify ordinary depth jitter into large speeds.
     :param debug_motion: print the inputs and result of each velocity estimate
     :return:
     """
@@ -1431,6 +1455,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         raise ValueError(
             "min_dynamic_observations must be at least last_n_records"
         )
+    if not np.isfinite(min_velocity_interval) or min_velocity_interval < 0.0:
+        raise ValueError("min_velocity_interval must be finite and nonnegative")
     if (
         not np.isfinite(max_dynamic_speed)
         or max_dynamic_speed <= min_dynamic_speed
@@ -1470,14 +1496,26 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         median_depth_list = []
         frame_indices = []
         observation_times = []
-        # extract depth of the bounding boxes
-        for frame_idx, detection in enumerate(detection_queue):
+        # Only use the current contiguous run of a track. Reusing observations
+        # from before a longer detector gap mixes two physical people when
+        # ByteTrack recovers/reassigns an ID after an occlusion.
+        missed_records = 0
+        for frame_idx in range(source_idx, -1, -1):
+            detection = detection_queue[frame_idx]
             pos_dict = detection.data
-            if track_id in pos_dict:
-                median_depth_list.append(pos_dict[track_id])
-                frame_indices.append(frame_idx)
-                if detection_timestamps is not None:
-                    observation_times.append(detection_timestamps[frame_idx])
+            if track_id not in pos_dict:
+                missed_records += 1
+                if missed_records > int(max_missed_records):
+                    break
+                continue
+            missed_records = 0
+            median_depth_list.append(pos_dict[track_id])
+            frame_indices.append(frame_idx)
+            if detection_timestamps is not None:
+                observation_times.append(detection_timestamps[frame_idx])
+        median_depth_list.reverse()
+        frame_indices.reverse()
+        observation_times.reverse()
         # in case not enough detection on a specific id:
         if len(median_depth_list) < last_n_records:
             continue
@@ -1514,7 +1552,6 @@ def update_points(points_input, detection_queue: list[sv.Detections],
             or not np.all(delta_times > 1e-6)
         ):
             continue
-
         # Fit one robust constant velocity across the recent observations using
         # the component-wise median of all pairwise slopes. Two samples preserve
         # immediate motion detection; later samples smooth ordinary jitter and
@@ -1523,10 +1560,14 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         for earlier_idx in range(len(observation_times) - 1):
             later_times = observation_times[earlier_idx + 1:]
             intervals = later_times - observation_times[earlier_idx]
-            pairwise_velocities.extend(
-                (fit_positions[earlier_idx + 1:] - fit_positions[earlier_idx])
-                / intervals[:, None]
-            )
+            usable = intervals >= float(min_velocity_interval)
+            if np.any(usable):
+                pairwise_velocities.extend(
+                    (fit_positions[earlier_idx + 1:][usable] - fit_positions[earlier_idx])
+                    / intervals[usable, None]
+                )
+        if not pairwise_velocities:
+            continue
         observed_relative_velocity = np.median(
             np.asarray(pairwise_velocities), axis=0
         )
