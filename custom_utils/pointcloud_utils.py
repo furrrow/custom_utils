@@ -1402,6 +1402,48 @@ def transform_point_between_camera_poses(point_camera, world_from_camera,
     return (target_from_world @ world_from_camera @ point_homogeneous)[:3]
 
 
+def _sweep_track_with_velocity(points_input, detection, track_id, velocity,
+                               time_look_ahead, min_dynamic_speed,
+                               max_dynamic_speed, sweep_steps):
+    """Project one current detection using an authoritative camera-frame velocity."""
+    velocity = np.asarray(velocity, dtype=np.float64)
+    if velocity.shape != (3,) or not np.all(np.isfinite(velocity)):
+        return None
+    ground_speed = np.linalg.norm(velocity[[0, 2]])
+    if (
+        ground_speed < float(min_dynamic_speed)
+        or np.linalg.norm(velocity) > float(max_dynamic_speed)
+    ):
+        return None
+
+    tracker_ids = getattr(detection, "tracker_id", None)
+    if tracker_ids is None:
+        return None
+    matches = np.flatnonzero(tracker_ids == track_id)
+    if len(matches) == 0:
+        return None
+    boxes = getattr(detection, "xyxy", None)
+    if boxes is None or len(boxes) <= matches[0]:
+        return None
+
+    x1, y1, x2, y2 = boxes[matches[0]].astype(int)
+    h, w = points_input.shape[:2]
+    x1 = np.clip(x1, 0, w)
+    x2 = np.clip(x2, 0, w)
+    y1 = np.clip(y1, 0, h)
+    y2 = np.clip(y2, 0, h)
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    future_shift = velocity * float(time_look_ahead)
+    box_3d_pts = points_input[y1:y2, x1:x2]
+    previous_median = np.nanmedian(box_3d_pts, axis=(0, 1))
+    points_input[y1:y2, x1:x2] = _sweep_point_patch(
+        box_3d_pts, future_shift, num_steps=sweep_steps
+    )
+    return previous_median, previous_median + future_shift
+
+
 def update_points(points_input, detection_queue: list[sv.Detections],
                   last_n_records=2, robot_velocity_camera=None,
                   robot_angular_velocity_camera=None, detection_timestamps=None,
@@ -1410,7 +1452,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                   min_dynamic_speed=0.1, max_dynamic_speed=3.0,
                   max_missed_records=1, sweep_steps=5, velocity_window=None,
                   min_dynamic_observations=3, min_velocity_interval=0.075,
-                  debug_motion=False):
+                  debug_motion=False, external_velocities_camera=None,
+                  allow_velocity_fallback=True):
     """
     Inflate moving objects' point clouds over their predicted swept path.
     :param points_input:
@@ -1434,6 +1477,10 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     :param min_velocity_interval: minimum time baseline used by the velocity
         fit. Shorter baselines amplify ordinary depth jitter into large speeds.
     :param debug_motion: print the inputs and result of each velocity estimate
+    :param external_velocities_camera: authoritative camera-frame velocities by
+        tracker ID. These take precedence over visual estimates.
+    :param allow_velocity_fallback: estimate velocity visually for tracks that
+        have no authoritative external velocity.
     :return:
     """
     point_movement = []
@@ -1464,6 +1511,32 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         raise ValueError(
             "max_dynamic_speed must be finite and greater than min_dynamic_speed"
         )
+
+    external_velocities_camera = external_velocities_camera or {}
+    external_track_ids = set()
+    if detection_queue and external_velocities_camera:
+        current_detection = detection_queue[-1]
+        current_track_ids = getattr(current_detection, "tracker_id", None)
+        if current_track_ids is not None:
+            for track_id in current_track_ids:
+                track_id = int(track_id)
+                if track_id not in external_velocities_camera:
+                    continue
+                external_track_ids.add(track_id)
+                movement = _sweep_track_with_velocity(
+                    points_input,
+                    current_detection,
+                    track_id,
+                    external_velocities_camera[track_id],
+                    time_look_ahead,
+                    min_dynamic_speed,
+                    max_dynamic_speed,
+                    sweep_steps,
+                )
+                if movement is not None:
+                    point_movement.append(movement)
+    if not allow_velocity_fallback:
+        return points_input, point_movement
     if len(detection_queue) < last_n_records:
         return points_input, point_movement
 
@@ -1493,6 +1566,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
 
     original_points = points_input.copy()
     for track_id in source_detection.tracker_id:
+        if int(track_id) in external_track_ids:
+            continue
         median_depth_list = []
         frame_indices = []
         observation_times = []
