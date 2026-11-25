@@ -8,7 +8,8 @@ from pathlib import Path
 
 # ROS2
 import rclpy
-from rclpy.clock import Clock, ClockType
+from rclpy.clock import Clock, ClockType, JumpThreshold
+from rclpy.duration import Duration
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray, Bool, String
@@ -49,8 +50,9 @@ def pd_controller(waypoint: np.ndarray, max_v, max_w, dt, eps=1e-8) -> Tuple[flo
     return v, w
 
 class ROSData:
-    def __init__(self, timeout: int = 3, queue_size: int = 1, name: str = ""):
+    def __init__(self, timeout: int = 3, queue_size: int = 1, name: str = "", now=None):
         self.timeout = timeout
+        self.now = now or time.monotonic
         self.last_time_received = None
         self.queue_size = queue_size
         self.data = None
@@ -65,13 +67,15 @@ class ROSData:
         self.last_time_received = None
 
     def set(self, data):
-        current_time = time.monotonic()
+        current_time = self.now()
 
         time_waited = float('inf')
         if self.last_time_received is not None:
             # Update time_waited with the actual time waited, otherwise stick to a huge value. This resets the data
             time_waited = current_time - self.last_time_received
 
+        if time_waited < 0:
+            self.clear()
         if self.queue_size == 1:
             self.data = data
         else:
@@ -83,14 +87,16 @@ class ROSData:
         self.last_time_received = current_time
 
     def is_valid(self, verbose: bool = False):
-        current_time = time.monotonic()
+        current_time = self.now()
 
         time_waited = float('inf')
         if self.last_time_received is not None:
             # Update time_waited with the actual time waited, otherwise stick to a huge value. This resets the data
             time_waited = current_time - self.last_time_received
 
-        valid = time_waited < self.timeout
+        if time_waited < 0:
+            self.clear()
+        valid = 0 <= time_waited < self.timeout
         if self.queue_size > 1:
             valid = valid and len(self.data) == self.queue_size
         if verbose and not valid:
@@ -105,7 +111,7 @@ class PDControllerNode(Node):
         if not np.isfinite(waypoint_timeout) or waypoint_timeout <= 0:
             raise ValueError("waypoint_timeout must be finite and greater than zero")
         self.vel_msg = Twist()
-        self.waypoint = ROSData(waypoint_timeout, name="waypoint")
+        self.waypoint = ROSData(waypoint_timeout, name="waypoint", now=lambda: self.get_clock().now().nanoseconds * 1e-9)
         self.reached_goal = False
         self.robot_name = robot_name
         self.simulation_episode_control = simulation_episode_control
@@ -173,11 +179,44 @@ class PDControllerNode(Node):
         self.timer = self.create_timer(
             1.0 / self.rate,
             self.timer_callback,
+            clock=self.get_clock(),
+        )
+        # Source switches/backward jumps invalidate receipt ages and cached motion.
+        self._clock_reset_pending = False
+        self._clock_jump_handle = self.get_clock().create_jump_callback(
+            JumpThreshold(min_forward=None, min_backward=Duration(nanoseconds=-1), on_clock_change=True),
+            post_callback=self._on_clock_jump,
+        )
+        # Independently stop a physical robot if behavioral clock/ticks stop progressing.
+        self._last_control_wall = time.monotonic()
+        self._liveness_timer = self.create_timer(
+            0.1, self._check_control_liveness,
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         self.get_logger().info("Registered with master node. Waiting for waypoints...")
 
+    def _on_clock_jump(self, _jump):
+        # Keep the clock callback nonblocking; the steady guard services this flag.
+        self._clock_reset_pending = True
+
+    def _apply_clock_reset(self):
+        if self._clock_reset_pending:
+            self._clock_reset_pending = False
+            self.waypoint.clear()
+            self.ready_for_motion = not self.simulation_episode_control
+            self.publish_zero()
+
+    def _check_control_liveness(self):
+        self._apply_clock_reset()
+        if time.monotonic() - self._last_control_wall >= 0.5:
+            # Stop output independently of ROS time. A paused/slow simulation
+            # retains its ROS-time lease; only a new behavioral tick resumes it.
+            if not self.get_clock().ros_time_is_active:
+                self.waypoint.clear()
+            self.publish_zero()
+
     def callback_drive(self, waypoint_msg: Float32MultiArray):
+        self._apply_clock_reset()
         """Callback function for the waypoint subscriber"""
         if self.simulation_episode_control:
             if self.current_episode_id is None:
@@ -221,6 +260,8 @@ class PDControllerNode(Node):
         self.reached_goal = reached_goal_msg.data
 
     def timer_callback(self):
+        self._apply_clock_reset()
+        self._last_control_wall = time.monotonic()
         if self.reached_goal:
             self.vel_out.publish(self.vel_msg)
             self.get_logger().info("Reached goal! Stopping...")
