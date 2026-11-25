@@ -1,4 +1,5 @@
 import json
+import os
 import numpy as np
 import yaml
 from typing import Tuple
@@ -8,7 +9,7 @@ from pathlib import Path
 
 # ROS2
 import rclpy
-from rclpy.clock import Clock, ClockType, JumpThreshold
+from rclpy.clock import JumpThreshold
 from rclpy.duration import Duration
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -108,6 +109,8 @@ class PDControllerNode(Node):
                  steer:bool = False, simulation_episode_control: bool = False,
                  waypoint_timeout: float = 5.0):
         super().__init__("pd_controller")
+        self._command_trace_enabled = os.environ.get("TICVLA_COMMAND_TRACE", "false").lower() == "true"
+        self._command_trace_sequence = 0
         if not np.isfinite(waypoint_timeout) or waypoint_timeout <= 0:
             raise ValueError("waypoint_timeout must be finite and greater than zero")
         self.vel_msg = Twist()
@@ -187,16 +190,10 @@ class PDControllerNode(Node):
             JumpThreshold(min_forward=None, min_backward=Duration(nanoseconds=-1), on_clock_change=True),
             post_callback=self._on_clock_jump,
         )
-        # Independently stop a physical robot if behavioral clock/ticks stop progressing.
-        self._last_control_wall = time.monotonic()
-        self._liveness_timer = self.create_timer(
-            0.1, self._check_control_liveness,
-            clock=Clock(clock_type=ClockType.STEADY_TIME),
-        )
         self.get_logger().info("Registered with master node. Waiting for waypoints...")
 
     def _on_clock_jump(self, _jump):
-        # Keep the clock callback nonblocking; the steady guard services this flag.
+        # Keep the clock callback nonblocking; the next controller callback resets state.
         self._clock_reset_pending = True
 
     def _apply_clock_reset(self):
@@ -204,20 +201,11 @@ class PDControllerNode(Node):
             self._clock_reset_pending = False
             self.waypoint.clear()
             self.ready_for_motion = not self.simulation_episode_control
-            self.publish_zero()
-
-    def _check_control_liveness(self):
-        self._apply_clock_reset()
-        if time.monotonic() - self._last_control_wall >= 0.5:
-            # Stop output independently of ROS time. A paused/slow simulation
-            # retains its ROS-time lease; only a new behavioral tick resumes it.
-            if not self.get_clock().ros_time_is_active:
-                self.waypoint.clear()
-            self.publish_zero()
+            self.publish_zero(trace_reason="clock_reset")
 
     def callback_drive(self, waypoint_msg: Float32MultiArray):
-        self._apply_clock_reset()
         """Callback function for the waypoint subscriber"""
+        self._apply_clock_reset()
         if self.simulation_episode_control:
             if self.current_episode_id is None:
                 self.get_logger().warning("Ignoring waypoints while waiting for simulation episode start")
@@ -248,10 +236,31 @@ class PDControllerNode(Node):
             self.ready_for_motion = False
             self.publish_zero(f"reset for new episode {episode_id}")
 
-    def publish_zero(self, reason: str = ""):
+    def _publish_command(self, reason):
+        self.vel_out.publish(self.vel_msg)
+        if not self._command_trace_enabled:
+            return
+        # Logging never selects, renews or alters a command/lease.
+        try:
+            self._command_trace_sequence += 1
+            wall = time.monotonic()
+            ros_ns = self.get_clock().now().nanoseconds
+            receipt = self.waypoint.last_time_received
+            record = dict(event="controller_publish", reason=reason,
+                sequence=self._command_trace_sequence, pid=os.getpid(),
+                episode_id=self.current_episode_id, monotonic_ns=round(wall * 1e9),
+                ros_now_ns=ros_ns, use_sim_time=self.get_clock().ros_time_is_active,
+                waypoint_receipt_ros_age_s=None if receipt is None else ros_ns*1e-9-receipt,
+                waypoint_lease_s=self.waypoint.timeout,
+                linear_x=float(self.vel_msg.linear.x), angular_z=float(self.vel_msg.angular.z))
+            self.get_logger().info("COMMAND_TRACE " + json.dumps(record, allow_nan=False))
+        except Exception:
+            pass  # Diagnostics must not interrupt publication.
+
+    def publish_zero(self, reason: str = "", *, trace_reason="unspecified_zero"):
         """Clear and publish zero vel commands"""
         self.vel_msg = Twist()
-        self.vel_out.publish(self.vel_msg)
+        self._publish_command(reason or trace_reason)
         if reason:
             self.get_logger().error(f"publish_zero error: {reason}")
 
@@ -261,18 +270,19 @@ class PDControllerNode(Node):
 
     def timer_callback(self):
         self._apply_clock_reset()
-        self._last_control_wall = time.monotonic()
         if self.reached_goal:
-            self.vel_out.publish(self.vel_msg)
+            self._publish_command("reached_goal_branch")
             self.get_logger().info("Reached goal! Stopping...")
             rclpy.shutdown()
             return
 
         if self.simulation_episode_control and not self.ready_for_motion:
-            self.publish_zero()
+            self.publish_zero(trace_reason="waiting_for_waypoint")
             return
 
+        command_reason = "waypoint_expired"
         if self.waypoint.is_valid(verbose=True):
+            command_reason = "control_tick_valid_waypoint"
             v, w = pd_controller(self.waypoint.get(), self.max_v, self.max_w, self.dt, eps=1e-8)
             self.vel_msg.linear.x = v
             self.vel_msg.angular.z = w
@@ -280,7 +290,7 @@ class PDControllerNode(Node):
         else:
             self.vel_msg = Twist() # no velocity
             self.waypoint.clear()
-        self.vel_out.publish(self.vel_msg)
+        self._publish_command(command_reason)
 
 def main():
     parser = argparse.ArgumentParser(description="Run the PD Controller")
