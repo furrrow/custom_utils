@@ -1196,6 +1196,7 @@ def pointcloud_to_esdf_pipeline(
     visibility_angle_min=None,
     visibility_angle_max=None,
     visibility_angle_increment=None,
+    dynamic_projection_mask=None,
 ):
     """
     End-to-end pipeline:
@@ -1279,6 +1280,25 @@ def pointcloud_to_esdf_pipeline(
     clearance = inflate_obstacles_via_esdf(esdf, robot_radius=robot_radius)
     unknown = build_unknown_mask(known)
 
+    dynamic_occupied = np.zeros_like(occupied, dtype=bool)
+    if dynamic_projection_mask is not None:
+        projection_mask = np.asarray(dynamic_projection_mask, dtype=bool)
+        if projection_mask.shape != np.asarray(points_xyz).shape[:2]:
+            raise ValueError(
+                "dynamic_projection_mask must match the point cloud image shape"
+            )
+        dynamic_points = pts_robot.reshape(-1, 3)[
+            projection_mask.reshape(-1) & valid_mask
+        ]
+        if len(dynamic_points) > 0:
+            grid = BEVGrid.create(x_min, x_max, y_min, y_max, resolution)
+            dynamic_rows, dynamic_cols, dynamic_in_bounds = points_to_bev_indices(
+                dynamic_points, grid
+            )
+            dynamic_occupied[
+                dynamic_rows[dynamic_in_bounds], dynamic_cols[dynamic_in_bounds]
+            ] = True
+
     return {
         "points_robot_nominal": pts_robot_nominal,
         "points_robot": pts_robot,
@@ -1288,6 +1308,7 @@ def pointcloud_to_esdf_pipeline(
         "visible_free_mask": visible_free,
         "known_mask": known,
         "unknown_mask": unknown,
+        "dynamic_occupied_mask": dynamic_occupied,
         "esdf": esdf,
         "clearance": clearance,
         "ground_alignment": ground_info,
@@ -1322,12 +1343,29 @@ def merge_points(points_input:np.ndarray, projected_patch: np.ndarray,
     return merged
 
 
-def _sweep_point_patch(points, displacement, num_steps=5):
+def _sweep_point_patch(points, displacement, num_steps=5, taper=False):
     """Distribute an object's points between its current and predicted positions.
 
     A point-cloud image has only one 3-D sample per pixel, so it cannot contain a
     full copy of the object at every prediction step.  Interleaving the samples
     preserves points at the current position while covering the swept volume.
+    Top view (schematic): the pedestrian travels upward toward the prediction
+    tip, a distance of velocity * lookahead from its current position.
+
+        Default: full-width sweep       Optional: taper=True
+        +----------------+                      /\
+        |                |                     /  \
+        |                |                    /    \
+        +----------------+                   +------+
+             pedestrian                      pedestrian
+
+    The default translates samples without changing their lateral offsets.
+    With taper=True, the lateral offset from the object's motion centreline is
+    multiplied by (1 - t), where t is the prediction fraction: full width at
+    t=0, half width at t=0.5, and zero width at t=1. Contraction is perpendicular
+    to velocity in the camera X/Z ground plane; height and longitudinal extent
+    are preserved. The finite object footprint and subsequent ESDF robot-radius
+    clearance make the occupied region a tapered wedge, not an exact triangle.
     """
     patch = np.asarray(points).copy()
     if patch.size == 0:
@@ -1341,7 +1379,15 @@ def _sweep_point_patch(points, displacement, num_steps=5):
         return patch
 
     fractions = (np.arange(len(valid_indices)) % num_steps) / (num_steps - 1)
-    flat[valid_indices] += fractions[:, None] * np.asarray(displacement)
+    displacement = np.asarray(displacement, dtype=np.float64)
+    ground_distance = np.linalg.norm(displacement[[0, 2]])
+    if taper and ground_distance > 0.0:
+        # Camera Y is vertical. Contract about the object, not the robot origin.
+        transverse = np.array([displacement[2], 0.0, -displacement[0]]) / ground_distance
+        centre = np.median(flat[valid_indices], axis=0)
+        lateral_offsets = (flat[valid_indices] - centre) @ transverse
+        flat[valid_indices] -= (fractions * lateral_offsets)[:, None] * transverse
+    flat[valid_indices] += fractions[:, None] * displacement
     return patch
 
 
@@ -1381,6 +1427,48 @@ def transform_point_between_camera_poses(point_camera, world_from_camera,
     return (target_from_world @ world_from_camera @ point_homogeneous)[:3]
 
 
+def _sweep_track_with_velocity(points_input, detection, track_id, velocity,
+                               time_look_ahead, min_dynamic_speed,
+                               max_dynamic_speed, sweep_steps, taper=False):
+    """Project one current detection using an authoritative camera-frame velocity."""
+    velocity = np.asarray(velocity, dtype=np.float64)
+    if velocity.shape != (3,) or not np.all(np.isfinite(velocity)):
+        return None
+    ground_speed = np.linalg.norm(velocity[[0, 2]])
+    if (
+        ground_speed < float(min_dynamic_speed)
+        or np.linalg.norm(velocity) > float(max_dynamic_speed)
+    ):
+        return None
+
+    tracker_ids = getattr(detection, "tracker_id", None)
+    if tracker_ids is None:
+        return None
+    matches = np.flatnonzero(tracker_ids == track_id)
+    if len(matches) == 0:
+        return None
+    boxes = getattr(detection, "xyxy", None)
+    if boxes is None or len(boxes) <= matches[0]:
+        return None
+
+    x1, y1, x2, y2 = boxes[matches[0]].astype(int)
+    h, w = points_input.shape[:2]
+    x1 = np.clip(x1, 0, w)
+    x2 = np.clip(x2, 0, w)
+    y1 = np.clip(y1, 0, h)
+    y2 = np.clip(y2, 0, h)
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    future_shift = velocity * float(time_look_ahead)
+    box_3d_pts = points_input[y1:y2, x1:x2]
+    previous_median = np.nanmedian(box_3d_pts, axis=(0, 1))
+    points_input[y1:y2, x1:x2] = _sweep_point_patch(
+        box_3d_pts, future_shift, num_steps=sweep_steps, taper=taper
+    )
+    return previous_median, previous_median + future_shift
+
+
 def update_points(points_input, detection_queue: list[sv.Detections],
                   last_n_records=2, robot_velocity_camera=None,
                   robot_angular_velocity_camera=None, detection_timestamps=None,
@@ -1388,9 +1476,12 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                   time_incr=0.1, time_look_ahead=1.0,
                   min_dynamic_speed=0.1, max_dynamic_speed=3.0,
                   max_missed_records=1, sweep_steps=5, velocity_window=None,
-                  min_dynamic_observations=3, debug_motion=False):
+                  min_dynamic_observations=3, min_velocity_interval=0.075,
+                  debug_motion=False, external_velocities_camera=None,
+                  allow_velocity_fallback=True, velocity_diagnostics=None, taper=False):
     """
     Inflate moving objects' point clouds over their predicted swept path.
+    :param velocity_diagnostics: optional callable receiving per-track diagnostic dictionaries; does not select velocities.
     :param points_input:
     :param detection_queue:
     :param robot_velocity_camera: in the CAMERA FRAME: x-right, y-down, z-forward
@@ -1404,12 +1495,19 @@ def update_points(points_input, detection_queue: list[sv.Detections],
     :param max_dynamic_speed: maximum plausible XZ ground-plane speed; faster
         estimates are treated as tracking/depth jumps and are not projected
     :param max_missed_records: retain a track for this many missed detector frames
+    :param taper: opt in to linearly narrowing transverse width; default keeps full width
     :param sweep_steps: number of interleaved positions along the predicted path
     :param velocity_window: maximum observations in the timestamp-aware velocity
         fit; defaults to last_n_records
     :param min_dynamic_observations: observations required before a track can be
         classified as dynamic; velocity is still estimated with fewer samples
+    :param min_velocity_interval: minimum time baseline used by the velocity
+        fit. Shorter baselines amplify ordinary depth jitter into large speeds.
     :param debug_motion: print the inputs and result of each velocity estimate
+    :param external_velocities_camera: authoritative camera-frame velocities by
+        tracker ID. These take precedence over visual estimates.
+    :param allow_velocity_fallback: estimate velocity visually for tracks that
+        have no authoritative external velocity.
     :return:
     """
     point_movement = []
@@ -1431,6 +1529,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         raise ValueError(
             "min_dynamic_observations must be at least last_n_records"
         )
+    if not np.isfinite(min_velocity_interval) or min_velocity_interval < 0.0:
+        raise ValueError("min_velocity_interval must be finite and nonnegative")
     if (
         not np.isfinite(max_dynamic_speed)
         or max_dynamic_speed <= min_dynamic_speed
@@ -1438,7 +1538,55 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         raise ValueError(
             "max_dynamic_speed must be finite and greater than min_dynamic_speed"
         )
+
+    external_velocities_camera = external_velocities_camera or {}
+    external_track_ids = set()
+    if detection_queue and external_velocities_camera:
+        current_detection = detection_queue[-1]
+        current_track_ids = getattr(current_detection, "tracker_id", None)
+        if current_track_ids is not None:
+            for track_id in current_track_ids:
+                track_id = int(track_id)
+                if track_id not in external_velocities_camera:
+                    continue
+                external_track_ids.add(track_id)
+                movement = _sweep_track_with_velocity(
+                    points_input,
+                    current_detection,
+                    track_id,
+                    external_velocities_camera[track_id],
+                    time_look_ahead,
+                    min_dynamic_speed,
+                    max_dynamic_speed,
+                    sweep_steps,
+                    taper=taper,
+                )
+                if velocity_diagnostics is not None:
+                    position = current_detection.data.get(track_id)
+                    velocity_diagnostics(dict(track_id=track_id,
+                        reason="external_projected" if movement is not None else "external_not_projected",
+                        projection_applied=movement is not None,
+                        observation_stamp=float(detection_timestamps[-1]) if detection_timestamps is not None else None,
+                        position_camera=None if position is None else np.asarray(position).tolist(),
+                        estimated_velocity_camera=np.asarray(external_velocities_camera[track_id]).tolist(),
+                        prediction_horizon=float(time_look_ahead)))
+                if movement is not None:
+                    point_movement.append(movement)
+    if not allow_velocity_fallback:
+        if velocity_diagnostics is not None and detection_queue:
+            current = detection_queue[-1]
+            for track_id, position in current.data.items():
+                if int(track_id) not in external_track_ids:
+                    velocity_diagnostics(dict(track_id=int(track_id), reason="authoritative_unmatched",
+                        projection_applied=False, position_camera=np.asarray(position).tolist(),
+                        observation_stamp=float(detection_timestamps[-1]) if detection_timestamps is not None else None))
+        return points_input, point_movement
     if len(detection_queue) < last_n_records:
+        if velocity_diagnostics and detection_queue:
+            for track_id, position in detection_queue[-1].data.items():
+                velocity_diagnostics(dict(track_id=int(track_id), reason="insufficient_history",
+                    projection_applied=False, observation_stamp=float(detection_timestamps[-1]) if detection_timestamps is not None else None,
+                    position_camera=np.asarray(position).tolist()))
         return points_input, point_movement
 
     # Use the most recent usable detection. This prevents one detector miss from
@@ -1467,19 +1615,43 @@ def update_points(points_input, detection_queue: list[sv.Detections],
 
     original_points = points_input.copy()
     for track_id in source_detection.tracker_id:
+        if int(track_id) in external_track_ids:
+            continue
+        diagnostic = dict(track_id=int(track_id), projection_applied=False,
+                          source_index=int(source_idx), observation_age=float(observation_age))
+        def report(reason, **fields):
+            if velocity_diagnostics is not None:
+                velocity_diagnostics(dict(diagnostic, reason=reason, **fields))
+
         median_depth_list = []
         frame_indices = []
         observation_times = []
-        # extract depth of the bounding boxes
-        for frame_idx, detection in enumerate(detection_queue):
+        # Only use the current contiguous run of a track. Reusing observations
+        # from before a longer detector gap mixes two physical people when
+        # ByteTrack recovers/reassigns an ID after an occlusion.
+        missed_records = 0
+        for frame_idx in range(source_idx, -1, -1):
+            detection = detection_queue[frame_idx]
             pos_dict = detection.data
-            if track_id in pos_dict:
-                median_depth_list.append(pos_dict[track_id])
-                frame_indices.append(frame_idx)
-                if detection_timestamps is not None:
-                    observation_times.append(detection_timestamps[frame_idx])
+            if track_id not in pos_dict:
+                missed_records += 1
+                if missed_records > int(max_missed_records):
+                    break
+                continue
+            missed_records = 0
+            median_depth_list.append(pos_dict[track_id])
+            frame_indices.append(frame_idx)
+            if detection_timestamps is not None:
+                observation_times.append(detection_timestamps[frame_idx])
+        median_depth_list.reverse()
+        frame_indices.reverse()
+        observation_times.reverse()
         # in case not enough detection on a specific id:
+        if velocity_diagnostics is not None and median_depth_list:
+            diagnostic.update(position_camera=np.asarray(median_depth_list[-1]).tolist(),
+                observation_stamp=float(observation_times[-1]) if observation_times else None)
         if len(median_depth_list) < last_n_records:
+            report("insufficient_history")
             continue
         track_observations = len(median_depth_list)
         # calculate position change over time
@@ -1491,12 +1663,17 @@ def update_points(points_input, detection_queue: list[sv.Detections],
             observation_times = np.asarray(
                 observation_times[-velocity_window:], dtype=np.float64
             )
+        if velocity_diagnostics is not None:
+            diagnostic.update(observation_stamps=observation_times.tolist(),
+                              fit_positions_camera=median_depth_list.tolist(),
+                              min_velocity_interval=float(min_velocity_interval))
         delta_times = np.diff(observation_times)
         pose_aligned_positions = None
         if camera_poses_world is not None:
             selected_poses = [camera_poses_world[idx] for idx in frame_indices]
             target_pose = selected_poses[-1]
             if target_pose is None or any(pose is None for pose in selected_poses):
+                report("missing_pose", selected_pose_available=[p is not None for p in selected_poses])
                 continue
             pose_aligned_positions = median_depth_list.copy()
             for position_idx, pose in enumerate(selected_poses[:-1]):
@@ -1513,8 +1690,8 @@ def update_points(points_input, detection_queue: list[sv.Detections],
             or not np.all(np.isfinite(fit_positions))
             or not np.all(delta_times > 1e-6)
         ):
+            report("invalid_positions_or_timestamps")
             continue
-
         # Fit one robust constant velocity across the recent observations using
         # the component-wise median of all pairwise slopes. Two samples preserve
         # immediate motion detection; later samples smooth ordinary jitter and
@@ -1523,10 +1700,15 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         for earlier_idx in range(len(observation_times) - 1):
             later_times = observation_times[earlier_idx + 1:]
             intervals = later_times - observation_times[earlier_idx]
-            pairwise_velocities.extend(
-                (fit_positions[earlier_idx + 1:] - fit_positions[earlier_idx])
-                / intervals[:, None]
-            )
+            usable = intervals >= float(min_velocity_interval)
+            if np.any(usable):
+                pairwise_velocities.extend(
+                    (fit_positions[earlier_idx + 1:][usable] - fit_positions[earlier_idx])
+                    / intervals[usable, None]
+                )
+        if not pairwise_velocities:
+            report("short_time_baseline")
+            continue
         observed_relative_velocity = np.median(
             np.asarray(pairwise_velocities), axis=0
         )
@@ -1540,6 +1722,10 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                 robot_angular_velocity_camera,
             )
 
+        if velocity_diagnostics is not None:
+            diagnostic.update(estimated_velocity_camera=estimated_velocity.tolist(),
+                observed_velocity_camera=observed_relative_velocity.tolist(),
+                track_observations=int(track_observations))
         if not np.all(np.isfinite(estimated_velocity)):
             if debug_motion:
                 print(
@@ -1547,6 +1733,7 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                     f"track={track_id} velocity={estimated_velocity.tolist()}",
                     flush=True,
                 )
+            report("nonfinite_velocity")
             continue
         # Camera X/Z span the navigation plane; camera Y is vertical. Detect
         # crossing and receding obstacles as well as approaching ones.
@@ -1588,11 +1775,17 @@ def update_points(points_input, detection_queue: list[sv.Detections],
                 f"future_shift_cam={future_shift.tolist()}",
                 flush=True,
             )
+        if velocity_diagnostics is not None:
+            diagnostic.update(ground_speed=float(ground_speed), speed=float(speed),
+                prediction_horizon=float(prediction_horizon), future_shift_camera=future_shift.tolist())
         if not is_dynamic:
+            report("insufficient_dynamic_observations" if not has_dynamic_evidence else
+                   "above_speed_gate" if not plausible_speed else "below_speed_gate")
             continue
         # extract points from bounding box, project forward to future position
         matches = np.flatnonzero(source_detection.tracker_id == track_id)
         if len(matches) == 0:
+            report("missing_box")
             continue
         last_idx = matches[0]
         x1, y1, x2, y2 = source_detection.xyxy[last_idx].astype(int)
@@ -1602,13 +1795,15 @@ def update_points(points_input, detection_queue: list[sv.Detections],
         y1 = np.clip(y1, 0, h)
         y2 = np.clip(y2, 0, h)
         if x2 <= x1 or y2 <= y1:
+            report("empty_box")
             continue
         box_3d_pts = points_input[y1:y2, x1:x2]
         box_project_forward = _sweep_point_patch(
-            box_3d_pts, future_shift, num_steps=sweep_steps
+            box_3d_pts, future_shift, num_steps=sweep_steps, taper=taper
         )
         prev_median_point = np.nanmedian(box_3d_pts, axis=(0, 1))
         after_median_point = prev_median_point + future_shift
         point_movement.append((prev_median_point, after_median_point))
         points_input[y1:y2, x1:x2] = box_project_forward
+        report("projected", projection_applied=True)
     return points_input, point_movement
