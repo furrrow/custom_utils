@@ -482,7 +482,7 @@ def visualize_camera_esdf(
     tracker_ids: Sequence[int] | np.ndarray | None = None,
     selected_waypoint: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Render the camera detections and regular ESDF view side by side."""
+    """Render camera detections beside the native clearance used by the stop gate."""
     camera_paths = [path for path in (before_path, after_path) if path is not None]
     esdf_paths = []
     if before_path is not None:
@@ -498,12 +498,30 @@ def visualize_camera_esdf(
     )
     axes[0].set_title("Camera detections and paths")
 
+    # Use the same unsmoothed, radius-subtracted array as path feasibility.
+    # Its upstream ESDF is transformed, so these values are not Euclidean metres.
+    clearance = np.asarray(esdf_result["clearance"])
+    minimum_clearance = float(getattr(args, "additional_clearance", 0.5))
     path_lines = plot_esdf_view(
-        axes[1], esdf_result["esdf"], BevView.from_args(args),
+        axes[1], clearance, BevView.from_args(args),
         paths=esdf_paths, movements=point_movement_bev, cmap="viridis",
-        selected_waypoint=selected_waypoint, colorbar_label="ESDF (m)",
+        selected_waypoint=selected_waypoint,
+        colorbar_label="Steering clearance (transformed ESDF minus robot radius)",
         publication_style=True,
     )
+    axes[1].set_title(f"Clearance gate: value > {minimum_clearance:g}")
+    finite_clearance = clearance[np.isfinite(clearance)]
+    if (finite_clearance.size
+            and finite_clearance.min() < minimum_clearance < finite_clearance.max()):
+        # Native maps are [lateral row, forward column], with cell-center samples.
+        lateral = args.y_min + (np.arange(clearance.shape[0]) + 0.5) * args.resolution
+        forward = args.x_min + (np.arange(clearance.shape[1]) + 0.5) * args.resolution
+        boundary = axes[1].contour(
+            lateral, forward, clearance.T, levels=[minimum_clearance],
+            colors="white", linestyles="--", linewidths=1.2,
+        )
+        axes[1].clabel(boundary, fmt={minimum_clearance: f"gate {minimum_clearance:g}"},
+                       inline=True, fontsize=9)
     add_esdf_legend(
         axes[1], path_lines, has_movements=len(point_movement_bev) > 0,
         has_selected_waypoint=selected_waypoint is not None,
